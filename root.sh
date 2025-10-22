@@ -221,15 +221,15 @@ choose_distro() {
     echo -e "${COLOR_BLUE}Chọn distro Linux muốn cài đặt:${COLOR_RESET}"
     echo ""
     echo "1) Ubuntu 24.04 LTS (Noble)"
-    echo "2) Ubuntu 22.04 LTS (Jammy)"
+    echo -e "2) Ubuntu 22.04 LTS (Jammy) ${COLOR_GREEN}⭐ KHÚYEN NGHỊ${COLOR_RESET}"
     echo "3) Ubuntu 20.04 LTS (Focal)"
     echo "4) Debian 12 (Bookworm)"
     echo "5) Debian 11 (Bullseye)"
     echo "6) Alpine Linux (nhẹ nhất)"
     echo "7) Arch Linux"
     echo ""
-    read -p "Nhập lựa chọn (1-7) [mặc định: 1]: " distro_choice
-    distro_choice=${distro_choice:-1}
+    read -p "Nhập lựa chọn (1-7) [mặc định: 2]: " distro_choice
+    distro_choice=${distro_choice:-2}
     
     case $distro_choice in
         1)
@@ -342,12 +342,13 @@ nameserver 8.8.4.4
 EOF
     
     # Tạo thư mục cần thiết
-    mkdir -p "$ROOTFS_DIR"/{dev,sys,proc,tmp,root,home,var/log}
+    mkdir -p "$ROOTFS_DIR"/{dev,sys,proc,tmp,root,home,var/log,etc/ssl/certs}
     
-    # Fix GPG keys cho Ubuntu/Debian
+    # Fix GPG keys và SSL cho Ubuntu/Debian
     if [[ "$DISTRO_NAME" == Ubuntu* ]] || [[ "$DISTRO_NAME" == Debian* ]]; then
-        print_info "Đang cấu hình GPG keys cho $DISTRO_NAME..."
+        print_info "Đang cấu hình GPG keys và SSL cho $DISTRO_NAME..."
         fix_ubuntu_gpg_keys
+        fix_ssl_certificates
     fi
     
     # Đánh dấu đã cài đặt
@@ -377,7 +378,7 @@ fix_ubuntu_gpg_keys() {
     chmod 755 "$ROOTFS_DIR/var/lib/apt/lists" 2>/dev/null || true
     chmod 700 "$ROOTFS_DIR/var/lib/apt/lists/partial" 2>/dev/null || true
     
-    # Tạo file cấu hình apt để bỏ qua GPG check nếu cần
+    # Tạo file cấu hình apt để bỏ qua GPG check và fix dpkg issues
     mkdir -p "$ROOTFS_DIR/etc/apt/apt.conf.d"
     cat > "$ROOTFS_DIR/etc/apt/apt.conf.d/99-proot-no-check" << 'EOF'
 // Cấu hình cho proot environment
@@ -386,7 +387,46 @@ Acquire::AllowDowngradeToInsecureRepositories "true";
 APT::Get::AllowUnauthenticated "true";
 APT::Get::Assume-Yes "false";
 Acquire::Check-Valid-Until "false";
+
+// Fix dpkg errors trong proot
+DPkg::Options {
+   "--force-confold";
+   "--force-confdef";
+   "--force-overwrite";
+};
+DPkg::Pre-Install-Pkgs {"/bin/true";};
+DPkg::Post-Invoke {"/bin/true";};
 EOF
+    
+    # Tạo policy-rc.d để ngăn services tự khởi động
+    mkdir -p "$ROOTFS_DIR/usr/sbin"
+    cat > "$ROOTFS_DIR/usr/sbin/policy-rc.d" << 'POLICY_EOF'
+#!/bin/bash
+# Ngăn services khởi động trong proot
+exit 101
+POLICY_EOF
+    chmod +x "$ROOTFS_DIR/usr/sbin/policy-rc.d"
+    
+    # Tạo fake systemctl để tránh lỗi
+    cat > "$ROOTFS_DIR/usr/local/bin/systemctl" << 'SYSTEMCTL_EOF'
+#!/bin/bash
+# Fake systemctl cho proot environment
+case "$1" in
+    start|stop|restart|reload|enable|disable|status)
+        echo "[PROOT] systemctl $@ - skipped in proot environment"
+        exit 0
+        ;;
+    is-active|is-enabled)
+        echo "inactive"
+        exit 3
+        ;;
+    *)
+        echo "systemctl: command not available in proot"
+        exit 0
+        ;;
+esac
+SYSTEMCTL_EOF
+    chmod +x "$ROOTFS_DIR/usr/local/bin/systemctl"
     
     # Tạo script fix GPG trong rootfs
     cat > "$ROOTFS_DIR/usr/local/bin/fix-apt-keys" << 'FIXKEYS_EOF'
@@ -426,11 +466,106 @@ FIXKEYS_EOF
     
     chmod +x "$ROOTFS_DIR/usr/local/bin/fix-apt-keys" 2>/dev/null || true
     
-    print_info "GPG keys đã được cấu hình"
+    # Tạo script fix dpkg errors
+    cat > "$ROOTFS_DIR/usr/local/bin/fix-dpkg-errors" << 'FIXDPKG_EOF'
+#!/bin/bash
+# Script fix dpkg errors trong proot
+
+echo "[*] Fixing dpkg errors..."
+
+# Fix dpkg database
+echo "[*] Cleaning dpkg database..."
+dpkg --configure -a 2>/dev/null || true
+apt-get install -f -y 2>/dev/null || true
+
+# Remove problematic packages
+echo "[*] Removing problematic packages..."
+for pkg in libpaper1 libgs9 libpaper-utils ghostscript; do
+    if dpkg -l | grep -q "^iU.*$pkg"; then
+        echo "  - Removing $pkg"
+        dpkg --purge --force-all $pkg 2>/dev/null || true
+    fi
+done
+
+# Clean apt cache
+echo "[*] Cleaning apt cache..."
+apt-get clean
+rm -rf /var/lib/apt/lists/*
+apt-get update -qq 2>/dev/null || true
+
+# Reconfigure packages
+echo "[*] Reconfiguring packages..."
+dpkg --configure -a 2>/dev/null || true
+
+echo "[*] Done! Try installing packages again."
+echo "    Use: apt install -y --no-install-recommends <package>"
+FIXDPKG_EOF
+    
+    chmod +x "$ROOTFS_DIR/usr/local/bin/fix-dpkg-errors" 2>/dev/null || true
+    
+    print_info "GPG keys và dpkg đã được cấu hình"
 }
 
 # =============================
-# TẠO SCRIPT KHỞI ĐỘNG
+# FIX SSL CERTIFICATES CHO CURL
+# =============================
+fix_ssl_certificates() {
+    print_info "Đang cấu hình SSL certificates..."
+    
+    # Tạo script fix curl/wget SSL errors
+    cat > "$ROOTFS_DIR/usr/local/bin/fix-ssl-certs" << 'FIXSSL_EOF'
+#!/bin/bash
+# Fix SSL certificates cho curl/wget trong proot
+
+echo "[*] Fixing SSL certificates..."
+
+# Cài đặt ca-certificates nếu chưa có
+if ! dpkg -l | grep -q ca-certificates; then
+    echo "[*] Installing ca-certificates..."
+    apt-get update -qq 2>/dev/null
+    apt-get install -y --no-install-recommends ca-certificates 2>/dev/null || true
+fi
+
+# Update certificates
+echo "[*] Updating certificates..."
+update-ca-certificates --fresh 2>/dev/null || true
+
+# Tạo symlinks nếu thiếu
+if [ ! -f /etc/ssl/certs/ca-certificates.crt ]; then
+    mkdir -p /etc/ssl/certs
+    if [ -f /usr/share/ca-certificates/mozilla/*.crt ]; then
+        cat /usr/share/ca-certificates/mozilla/*.crt > /etc/ssl/certs/ca-certificates.crt 2>/dev/null || true
+    fi
+fi
+
+# Set environment variables
+cat >> /root/.bashrc << 'BASHRC'
+# SSL certificates
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+export SSL_CERT_DIR=/etc/ssl/certs
+export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+BASHRC
+
+echo "[*] Done! SSL certificates configured."
+echo "    Reload shell: source ~/.bashrc"
+FIXSSL_EOF
+    
+    chmod +x "$ROOTFS_DIR/usr/local/bin/fix-ssl-certs" 2>/dev/null || true
+    
+    # Pre-configure SSL environment
+    cat >> "$ROOTFS_DIR/root/.bashrc" << 'BASHRC_SSL'
+
+# SSL certificates for curl/wget
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+export SSL_CERT_DIR=/etc/ssl/certs
+export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+BASHRC_SSL
+    
+    print_info "SSL certificates đã được cấu hình"
+}
+
+# =============================
+# TẠO SCRIPT KHỞI ĐộNG
 # =============================
 create_startup_script() {
     cat > "$ROOTFS_DIR/root/.startup.sh" << 'STARTUP_EOF'
@@ -458,6 +593,12 @@ if command -v apt &>/dev/null && [ ! -f /root/.apt_updated ]; then
         /usr/local/bin/fix-apt-keys 2>&1 | grep -E "\[\*\]|Done" || true
     fi
     
+    # Cài đặt ca-certificates cho curl/wget
+    if ! dpkg -l | grep -q ca-certificates; then
+        printf "${YELLOW}Đang cài đặt ca-certificates...${RESET}\n"
+        apt-get install -y --no-install-recommends ca-certificates 2>/dev/null || true
+    fi
+    
     # Fix permissions cho apt
     chmod 644 /etc/apt/trusted.gpg.d/*.gpg 2>/dev/null || true
     mkdir -p /var/lib/apt/lists/partial
@@ -473,8 +614,12 @@ if command -v apt &>/dev/null && [ ! -f /root/.apt_updated ]; then
         touch /root/.apt_updated
     fi
     
-    printf "${GREEN}Sử dụng: apt install <package>${RESET}\n"
-    printf "${YELLOW}Nếu gặp lỗi GPG, chạy: fix-apt-keys${RESET}\n"
+    printf "${GREEN}Sử dụng: apt install -y --no-install-recommends <package>${RESET}\n"
+    printf "${YELLOW}Lưu ý:${RESET}\n"
+    printf "  - Nếu gặp lỗi GPG: fix-apt-keys\n"
+    printf "  - Nếu gặp lỗi dpkg: fix-dpkg-errors\n"
+    printf "  - Nếu curl/wget lỗi SSL: fix-ssl-certs\n"
+    printf "  - Nên dùng --no-install-recommends để tránh lỗi\n"
     
 elif command -v apk &>/dev/null && [ ! -f /root/.apk_updated ]; then
     printf "${GREEN}Khởi tạo apk...${RESET}\n"
@@ -578,15 +723,19 @@ ${COLOR_GREEN}Ví dụ:${COLOR_RESET}
   FAKEROOT_DIR=/custom/path $0  # Dùng thư mục tùy chỉnh
 
 ${COLOR_GREEN}Bên trong fake root:${COLOR_RESET}
-  apt update && apt install vim python3 nodejs
+  apt update && apt install -y --no-install-recommends vim python3 nodejs
   apk add curl wget git
   pacman -Syu base-devel
 
-${COLOR_YELLOW}Xử lý lỗi GPG (Ubuntu/Debian):${COLOR_RESET}
-  Nếu gặp lỗi "NO_PUBKEY" hoặc GPG errors:
-  1. Chạy: fix-apt-keys
-  2. Hoặc: apt update --allow-insecure-repositories
-  3. Cài package: apt install -y --allow-unauthenticated <package>
+${COLOR_YELLOW}Xử lý lỗi (Ubuntu/Debian):${COLOR_RESET}
+  Lỗi GPG "NO_PUBKEY":
+    1. Chạy: fix-apt-keys
+    2. Hoặc: apt update --allow-insecure-repositories
+  
+  Lỗi dpkg "Sub-process /usr/bin/dpkg returned an error code (1)":
+    1. Chạy: fix-dpkg-errors
+    2. Hoặc: apt install -y --no-install-recommends <package>
+    3. Hoặc: dpkg --configure -a && apt install -f
 EOF
 }
 
