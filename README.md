@@ -36,7 +36,7 @@ See [CHANGELOG.md](CHANGELOG.md) for full details.
 
 **English Users:**
 ```bash
-# Install and start (auto-selects Ubuntu 22.04 by default)
+# Install and start (auto-selects Ubuntu 22.04 LTS by default)
 bash root-en.sh
 
 # Or specify options
@@ -48,7 +48,7 @@ bash root-en.sh -h    # Show help
 
 **Người Dùng Tiếng Việt:**
 ```bash
-# Cài đặt và khởi động (tự động chọn Ubuntu 22.04)
+# Cài đặt và khởi động (tự động chọn Ubuntu 22.04 LTS)
 bash root.sh
 
 # Hoặc chỉ định tùy chọn
@@ -60,7 +60,7 @@ bash root.sh -h    # Hiển thị trợ giúp
 
 ## ✨ Features
 
-- ✅ **5 Linux Distributions**: Ubuntu (24.04, 22.04, 20.04), Alpine, Arch
+- ✅ **3 Linux Distributions**: Ubuntu (22.04, 20.04), Alpine
 - ✅ **Auto-fix GPG errors**: Automatically configures GPG keys
 - ✅ **Auto-fix DPKG errors**: Prevents service startup issues
 - ✅ **Auto-fix SSL/Curl errors**: Pre-configures CA certificates
@@ -188,10 +188,8 @@ Ubuntu 22.04 LTS (Jammy) is the **recommended choice** because:
 | Distribution | Stability | Package Count | SSL Issues | Recommended |
 |-------------|-----------|---------------|------------|-------------|
 | Ubuntu 22.04 | ⭐⭐⭐⭐⭐ | 50,000+ | Rare | ✅ **YES** |
-| Ubuntu 24.04 | ⭐⭐⭐⭐ | 45,000+ | Sometimes | ✅ |
 | Ubuntu 20.04 | ⭐⭐⭐⭐ | 40,000+ | Rare | ✅ |
 | Alpine | ⭐⭐⭐⭐ | 10,000+ | Rare | ✅ (minimal) |
-| Arch | ⭐⭐⭐ | 12,000+ | Sometimes | ⚠️ (amd64 only) |
 
 ## 🔐 Security Notes
 

@@ -247,35 +247,29 @@ choose_distro() {
     echo ""
     echo -e "${COLOR_BLUE}Chọn distro Linux muốn cài đặt:${COLOR_RESET}"
     echo ""
-    echo "1) Ubuntu 24.04 LTS (Noble)"
-    echo "2) Ubuntu 22.04 LTS (Jammy) ${COLOR_GREEN}⭐ KHÚYEN NGHỊ${COLOR_RESET}"
-    echo "3) Ubuntu 20.04 LTS (Focal)"
-    echo "4) Alpine Linux (nhẹ nhất)"
-    echo "5) Arch Linux (chỉ amd64)"
+    echo "1) Ubuntu 22.04 LTS (Jammy) ${COLOR_GREEN}⭐ KHÚYEN NGHỊ${COLOR_RESET}"
+    echo "2) Ubuntu 20.04 LTS (Focal)"
+    echo "3) Alpine Linux (nhẹ nhất)"
     echo ""
-    read -p "Nhập lựa chọn (1-5) [mặc định: 2]: " distro_choice
-    distro_choice=${distro_choice:-2}
+    read -p "Nhập lựa chọn (1-3) [mặc định: 1]: " distro_choice
+    distro_choice=${distro_choice:-1}
     
     # Validate input
-    if ! [[ "$distro_choice" =~ ^[1-5]$ ]]; then
+    if ! [[ "$distro_choice" =~ ^[1-3]$ ]]; then
         print_error "Lựa chọn không hợp lệ: $distro_choice"
         return 1
     fi
     
     case $distro_choice in
         1)
-            DISTRO_NAME="Ubuntu 24.04"
-            ROOTFS_URL="http://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.3-base-${ARCH_ALT}.tar.gz"
-            ;;
-        2)
             DISTRO_NAME="Ubuntu 22.04"
             ROOTFS_URL="http://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04-base-${ARCH_ALT}.tar.gz"
             ;;
-        3)
+        2)
             DISTRO_NAME="Ubuntu 20.04"
             ROOTFS_URL="http://cdimage.ubuntu.com/ubuntu-base/releases/20.04/release/ubuntu-base-20.04.4-base-${ARCH_ALT}.tar.gz"
             ;;
-        4)
+        3)
             DISTRO_NAME="Alpine Linux"
             # Validate ALPINE_ARCH
             [ -z "$ALPINE_ARCH" ] && {
@@ -284,14 +278,6 @@ choose_distro() {
             }
             # Cập nhật lên phiên bản Alpine mới nhất
             ROOTFS_URL="https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/${ALPINE_ARCH}/alpine-minirootfs-3.20.3-${ALPINE_ARCH}.tar.gz"
-            ;;
-        5)
-            DISTRO_NAME="Arch Linux"
-            # Sử dụng Arch Linux Bootstrap
-            case "$ARCH_ALT" in
-                amd64) ROOTFS_URL="https://geo.mirror.pkgbuild.com/iso/latest/archlinux-bootstrap-x86_64.tar.gz" ;;
-                *) print_error "Kiến trúc không được hỗ trợ cho Arch Linux: $ARCH_ALT (chỉ hỗ trợ amd64)"; return 1 ;;
-            esac
             ;;
         *)
             print_error "Lựa chọn không hợp lệ"
@@ -857,6 +843,9 @@ fi
 
 printf "\n${CYAN}Gõ 'exit' để thoát${RESET}\n\n"
 export PS1='\[\033[01;31m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\# '
+
+# Set PATH for Alpine (critical!)
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Detect shell - Alpine uses /bin/sh, others use /bin/bash
 if [ -f /bin/bash ]; then
