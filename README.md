@@ -291,7 +291,6 @@ bash root.sh -r
 
 - **Quick help**: `bash root.sh --help`
 - **Inside proot**: Run `fix-apt-keys --help`, `fix-dpkg-errors --help`
-- **Documentation**: Read the MD files in `/home/red/Documents/`
 
 ## 🙏 Credits
 
