@@ -27,15 +27,17 @@ bash root.sh -u
 
 ### Ubuntu/Debian (⭐ Ubuntu 22.04 Recommended)
 ```bash
-# CORRECT way (avoid dpkg errors)
+# RECOMMENDED way (minimal dependencies)
 apt install -y --no-install-recommends <package>
 
 # Examples
 apt update
 apt install -y --no-install-recommends vim curl wget git python3 nodejs
 
-# Avoid these packages (often fail in proot)
-# ❌ ghostscript, cups, avahi-daemon, systemd-related packages
+# NEW! Can now install packages with services (services won't run, but binaries work)
+apt install -y mysql-server postgresql nginx ghostscript
+mysql --version  # Works!
+systemctl status mysql  # Shows inactive, doesn't crash
 ```
 
 ### Alpine Linux
@@ -106,17 +108,23 @@ systemctl           # Fake systemctl (does nothing)
 ## 📝 Best Practices
 
 ### ✅ DO:
-- Always use `--no-install-recommends` when installing packages
+- Always use `--no-install-recommends` when installing packages (recommended)
 - Install minimal packages (vim, curl, wget, git, python3-minimal)
 - Check `dpkg -l | grep "^iU"` for broken packages
 - Use `apt clean` regularly to save space
 - **Use Ubuntu 22.04 LTS** - most stable and tested
+- **NEW!** You CAN install packages with services (they just won't run)
+
+### ⚠️ Services Note:
+- You CAN install: mysql-server, postgresql, nginx, apache2, cups, ghostscript
+- Services WON'T actually run (systemd doesn't work in proot)
+- But you CAN use the binaries: `mysql`, `psql`, `nginx -v`, etc.
+- Useful for: CLI tools, testing configs, using client utilities
 
 ### ❌ DON'T:
-- Install packages with services (ghostscript, cups, mysql-server, postgresql)
-- Install desktop environments (gnome, kde, xfce)
-- Install systemd-related packages
-- Run services in proot (won't work)
+- Install desktop environments (gnome, kde, xfce) - too heavy
+- Expect services to actually run (they install but don't start)
+- Install kernel modules - won't load in proot
 
 ## 💡 Tips & Tricks
 
@@ -194,15 +202,17 @@ bash root.sh -u
 
 ### Ubuntu/Debian (⭐ Ubuntu 22.04 Khuyến nghị)
 ```bash
-# Cách ĐÚNG (tránh lỗi dpkg)
+# Cách KHUYẾN NGHỊ (ít dependencies)
 apt install -y --no-install-recommends <package>
 
 # Ví dụ
 apt update
 apt install -y --no-install-recommends vim curl wget git python3 nodejs
 
-# Tránh cài các packages này (thường lỗi trong proot)
-# ❌ ghostscript, cups, avahi-daemon, systemd-related packages
+# MỚI! Giờ có thể cài packages có services (services không chạy, nhưng binaries hoạt động)
+apt install -y mysql-server postgresql nginx ghostscript
+mysql --version  # Hoạt động!
+systemctl status mysql  # Hiện inactive, không crash
 ```
 
 ### Alpine Linux
@@ -280,17 +290,23 @@ systemctl           # Fake systemctl (không làm gì)
 ## 📝 Best Practices
 
 ### ✅ NÊN làm:
-- Luôn dùng `--no-install-recommends` khi cài packages
+- Luôn dùng `--no-install-recommends` khi cài packages (khuyến nghị)
 - Cài minimal packages (vim, curl, wget, git, python3-minimal)
 - Kiểm tra `dpkg -l | grep "^iU"` để xem packages lỗi
 - Dùng `apt clean` thường xuyên để tiết kiệm dung lượng
 - **Dùng Ubuntu 22.04 LTS** - ổn định và đã test kỹ nhất
+- **MỚI!** Có thể cài packages có services (chúng chỉ không chạy thôi)
+
+### ⚠️ Lưu ý về Services:
+- CÓ THỂ cài: mysql-server, postgresql, nginx, apache2, cups, ghostscript
+- Services KHÔNG thực sự chạy (systemd không hoạt động trong proot)
+- Nhưng CÓ THỂ dùng binaries: `mysql`, `psql`, `nginx -v`, etc.
+- Hữu ích cho: CLI tools, test configs, dùng client utilities
 
 ### ❌ KHÔNG NÊN làm:
-- Cài packages có services (ghostscript, cups, mysql-server, postgresql)
-- Cài desktop environments (gnome, kde, xfce)
-- Cài systemd-related packages
-- Chạy services trong proot (không hoạt động)
+- Cài desktop environments (gnome, kde, xfce) - quá nặng
+- Mong đợi services thực sự chạy (chúng cài được nhưng không start)
+- Cài kernel modules - không load được trong proot
 
 ## 🐛 Debug
 

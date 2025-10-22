@@ -165,16 +165,37 @@ export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 EOF
 ```
 
-#### Method 6: Avoid errors when installing packages
+#### Method 6: Installing packages with services (NEW!)
+
+**Good news!** You can now install packages with services:
+
 ```bash
-# Always use --no-install-recommends
+# These now work! (services won't run, but packages install fine)
+apt install -y mysql-server postgresql nginx apache2 ghostscript cups
+
+# The binaries work even though services don't run
+mysql --version
+psql --version
+nginx -v
+
+# systemctl won't crash, just shows inactive
+systemctl status mysql
+# Output: Active: inactive (dead)
+
+# Use client tools to connect to remote servers
+mysql -h remote_host -u user -p
+psql -h remote_host -U user
+```
+
+#### Method 7: Best practices for package installation
+```bash
+# Recommended: use --no-install-recommends (fewer dependencies)
 apt install -y --no-install-recommends vim curl wget
 
-# Avoid packages with services (ghostscript, cups, avahi, etc.)
-# If needed, install minimal version
-apt install -y --no-install-recommends python3-minimal
+# But you can also install with full dependencies if needed
+apt install -y mysql-server  # Works now!
 
-# If package must be installed, use force
+# If package must be installed with force
 dpkg -i --force-all package.deb
 ```
 
@@ -461,16 +482,37 @@ export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 EOF
 ```
 
-#### Phương pháp 6: Tránh lỗi khi cài packages
+#### Phương pháp 6: Cài packages có services (MỚI!)
+
+**Tin tốt!** Giờ có thể cài packages có services:
+
 ```bash
-# Luôn dùng --no-install-recommends
+# Các packages này giờ hoạt động! (services không chạy, nhưng packages cài được)
+apt install -y mysql-server postgresql nginx apache2 ghostscript cups
+
+# Binaries hoạt động dù services không chạy
+mysql --version
+psql --version
+nginx -v
+
+# systemctl không crash, chỉ hiện inactive
+systemctl status mysql
+# Output: Active: inactive (dead)
+
+# Dùng client tools để kết nối remote servers
+mysql -h remote_host -u user -p
+psql -h remote_host -U user
+```
+
+#### Phương pháp 7: Best practices khi cài packages
+```bash
+# Khuyến nghị: dùng --no-install-recommends (ít dependencies hơn)
 apt install -y --no-install-recommends vim curl wget
 
-# Tránh packages có services (ghostscript, cups, avahi, etc.)
-# Nếu cần, cài minimal version
-apt install -y --no-install-recommends python3-minimal
+# Nhưng cũng có thể cài với full dependencies nếu cần
+apt install -y mysql-server  # Giờ hoạt động!
 
-# Nếu package bắt buộc phải cài, dùng force
+# Nếu package bắt buộc phải cài với force
 dpkg -i --force-all package.deb
 ```
 

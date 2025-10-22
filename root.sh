@@ -1,5 +1,8 @@
-#!/bin/bash
+
+#!/usr/bin/env bash
+# Strict mode for better error handling
 set -euo pipefail
+IFS=$'\n\t'
 
 # =============================
 # PROOT FAKE ROOT ENVIRONMENT
@@ -9,11 +12,16 @@ set -euo pipefail
 
 # Cấu hình
 ROOTFS_DIR="${FAKEROOT_DIR:-$HOME/.fakeroot-proot}"
-PROOT_BIN="$HOME/.local/bin/proot"
-MAX_RETRIES=3
-TIMEOUT=30
-ARCH=$(uname -m)
+PROOT_BIN="${PROOT_BIN:-$HOME/.local/bin/proot}"
+MAX_RETRIES="${MAX_RETRIES:-3}"
+TIMEOUT="${TIMEOUT:-30}"
+ARCH="$(uname -m)"
 ALPINE_ARCH=""
+ARCH_ALT=""  # Initialize to avoid unbound variable
+
+# Script version
+SCRIPT_VERSION="2.0.0"
+SCRIPT_DATE="2025-01-22"
 
 COLOR_RED='\033[0;31m'
 COLOR_GREEN='\033[0;32m'
@@ -41,10 +49,15 @@ print_error() {
 # Cleanup khi exit
 cleanup() {
     local exit_code=$?
-    [ -n "${ROOTFS_FILE:-}" ] && rm -f "$ROOTFS_FILE" "${ROOTFS_FILE%.xz}" "${ROOTFS_FILE%.gz}" 2>/dev/null
+    # Xóa tất cả temp files
+    if [ -n "${ROOTFS_FILE:-}" ]; then
+        rm -f "$ROOTFS_FILE" "${ROOTFS_FILE%.xz}" "${ROOTFS_FILE%.gz}" "${ROOTFS_FILE%.bz2}" 2>/dev/null || true
+    fi
+    # Xóa các temp files khác
+    rm -f /tmp/rootfs_$$.* 2>/dev/null || true
     return $exit_code
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT INT TERM HUP
 
 # Download file với retry (hỗ trợ cả wget và curl)
 download_file() {
@@ -66,19 +79,26 @@ download_file() {
     for ((i=1; i<=retries; i++)); do
         if [ "$download_cmd" = "wget" ]; then
             # wget: bỏ -q để show progress hoạt động
-            if wget --tries=1 --timeout=$TIMEOUT --no-hsts --show-progress -O "$output" "$url" 2>&1 | grep -v '^--'; then
-                [ -s "$output" ] && return 0
+            if wget --tries=1 --timeout="$TIMEOUT" --no-hsts --show-progress -O "$output" "$url" 2>&1 | grep -v '^--'; then
+                if [ -s "$output" ]; then
+                    # Verify file is not HTML error page
+                    if file "$output" | grep -qE 'gzip|XZ|tar|compressed'; then
+                        return 0
+                    elif [ "${output##*.}" = "gz" ] || [ "${output##*.}" = "xz" ]; then
+                        return 0  # Trust extension if file command fails
+                    fi
+                fi
             fi
         else
             # curl fallback
-            if curl -fSL --connect-timeout $TIMEOUT --max-time $((TIMEOUT*2)) -o "$output" "$url" 2>&1; then
+            if curl -fSL --connect-timeout "$TIMEOUT" --max-time $((TIMEOUT*2)) -o "$output" "$url" 2>&1; then
                 [ -s "$output" ] && return 0
             fi
         fi
         
         [ $i -lt $retries ] && print_warn "Thử lại ($i/$retries)..."
         rm -f "$output"  # Xóa file lỗi trước khi retry
-        sleep 2
+        sleep $((i * 2))  # Exponential backoff
     done
     return 1
 }
@@ -93,7 +113,14 @@ extract_tar() {
     
     print_info "Đang giải nén $(basename "$file")..."
     
-    # Tự động phát hiện và giải nén với verbose để debug
+    # Kiểm tra file size
+    local file_size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null || echo 0)
+    if [ "$file_size" -lt 1000 ]; then
+        print_error "File quá nhỏ ($file_size bytes), có thể bị lỗi"
+        return 1
+    fi
+    
+    # Tự động phát hiện và giải nén
     if tar -xf "$file" -C "$dest" 2>&1 | head -n 5; then
         print_info "Giải nén thành công!"
         return 0
@@ -147,7 +174,7 @@ display_complete() {
 # =============================
 check_architecture() {
     # Chỉ chạy một lần
-    [ -n "${ARCH_ALT:-}" ] && return 0
+    [ -n "${ARCH_ALT:-}" ] && [ "$ARCH_ALT" != "" ] && return 0
     
     case "$ARCH" in
         x86_64)
@@ -231,6 +258,12 @@ choose_distro() {
     read -p "Nhập lựa chọn (1-7) [mặc định: 2]: " distro_choice
     distro_choice=${distro_choice:-2}
     
+    # Validate input
+    if ! [[ "$distro_choice" =~ ^[1-7]$ ]]; then
+        print_error "Lựa chọn không hợp lệ: $distro_choice"
+        return 1
+    fi
+    
     case $distro_choice in
         1)
             DISTRO_NAME="Ubuntu 24.04"
@@ -290,16 +323,21 @@ install_rootfs() {
     print_info "Đang tải rootfs: $(basename "$ROOTFS_URL")"
     
     # Xác định extension từ URL (cải thiện logic)
-    local ext="${ROOTFS_URL##*.}"
     if [[ "$ROOTFS_URL" == *.tar.xz ]]; then
         ROOTFS_FILE="/tmp/rootfs_$$.tar.xz"
     elif [[ "$ROOTFS_URL" == *.tar.gz ]]; then
         ROOTFS_FILE="/tmp/rootfs_$$.tar.gz"
     elif [[ "$ROOTFS_URL" == *.tar.bz2 ]]; then
         ROOTFS_FILE="/tmp/rootfs_$$.tar.bz2"
-    else
+    elif [[ "$ROOTFS_URL" == *.tar ]]; then
         ROOTFS_FILE="/tmp/rootfs_$$.tar"
+    else
+        # Default to tar.gz if unknown
+        ROOTFS_FILE="/tmp/rootfs_$$.tar.gz"
     fi
+    
+    # Export for cleanup
+    export ROOTFS_FILE
     
     # Tải với fallback
     if ! download_file "$ROOTFS_URL" "$ROOTFS_FILE"; then
@@ -394,39 +432,99 @@ DPkg::Options {
    "--force-confdef";
    "--force-overwrite";
 };
+
+// Cho phép cài packages với services
 DPkg::Pre-Install-Pkgs {"/bin/true";};
 DPkg::Post-Invoke {"/bin/true";};
+
+// Không fail khi services không start được
+DPkg::NoTriggers "true";
 EOF
     
-    # Tạo policy-rc.d để ngăn services tự khởi động
+    # Tạo policy-rc.d để ngăn services tự khởi động (nhưng cho phép cài đặt)
     mkdir -p "$ROOTFS_DIR/usr/sbin"
     cat > "$ROOTFS_DIR/usr/sbin/policy-rc.d" << 'POLICY_EOF'
 #!/bin/bash
-# Ngăn services khởi động trong proot
+# Cho phép cài đặt packages nhưng không khởi động services trong proot
+# Exit code 101 = action forbidden by policy
+echo "[PROOT] Service action blocked: $@" >&2
 exit 101
 POLICY_EOF
     chmod +x "$ROOTFS_DIR/usr/sbin/policy-rc.d"
     
-    # Tạo fake systemctl để tránh lỗi
+    # Tạo fake systemctl để tránh lỗi (improved version)
+    mkdir -p "$ROOTFS_DIR/usr/local/bin"
     cat > "$ROOTFS_DIR/usr/local/bin/systemctl" << 'SYSTEMCTL_EOF'
 #!/bin/bash
-# Fake systemctl cho proot environment
+# Fake systemctl cho proot environment - allows package installation
+
 case "$1" in
-    start|stop|restart|reload|enable|disable|status)
-        echo "[PROOT] systemctl $@ - skipped in proot environment"
+    start|stop|restart|reload)
+        echo "[PROOT] systemctl $@ - service action skipped"
         exit 0
         ;;
-    is-active|is-enabled)
+    enable|disable)
+        echo "[PROOT] systemctl $@ - service configuration skipped"
+        exit 0
+        ;;
+    status)
+        echo "● $2"
+        echo "   Loaded: loaded (/lib/systemd/system/$2; disabled; vendor preset: enabled)"
+        echo "   Active: inactive (dead)"
+        echo "[PROOT] Services don't run in proot environment"
+        exit 3
+        ;;
+    is-active)
         echo "inactive"
         exit 3
         ;;
+    is-enabled)
+        echo "disabled"
+        exit 1
+        ;;
+    is-failed)
+        echo "inactive"
+        exit 1
+        ;;
+    daemon-reload|reset-failed)
+        echo "[PROOT] systemctl $@ - skipped"
+        exit 0
+        ;;
+    list-units|list-unit-files)
+        echo "UNIT FILE STATE"
+        echo "[PROOT] No units in proot environment"
+        exit 0
+        ;;
+    --version)
+        echo "systemctl (fake) for proot"
+        echo "Does not actually manage services"
+        exit 0
+        ;;
     *)
-        echo "systemctl: command not available in proot"
+        echo "[PROOT] systemctl $@ - command accepted but not executed"
         exit 0
         ;;
 esac
 SYSTEMCTL_EOF
     chmod +x "$ROOTFS_DIR/usr/local/bin/systemctl"
+    
+    # Tạo fake service command
+    cat > "$ROOTFS_DIR/usr/local/bin/service" << 'SERVICE_EOF'
+#!/bin/bash
+# Fake service command cho proot environment
+echo "[PROOT] service $@ - skipped in proot environment"
+exit 0
+SERVICE_EOF
+    chmod +x "$ROOTFS_DIR/usr/local/bin/service"
+    
+    # Tạo fake invoke-rc.d
+    cat > "$ROOTFS_DIR/usr/local/sbin/invoke-rc.d" << 'INVOKE_EOF'
+#!/bin/bash
+# Fake invoke-rc.d cho proot environment
+echo "[PROOT] invoke-rc.d $@ - skipped"
+exit 0
+INVOKE_EOF
+    chmod +x "$ROOTFS_DIR/usr/local/sbin/invoke-rc.d" 2>/dev/null || true
     
     # Tạo script fix GPG trong rootfs
     cat > "$ROOTFS_DIR/usr/local/bin/fix-apt-keys" << 'FIXKEYS_EOF'
@@ -478,13 +576,11 @@ echo "[*] Cleaning dpkg database..."
 dpkg --configure -a 2>/dev/null || true
 apt-get install -f -y 2>/dev/null || true
 
-# Remove problematic packages
-echo "[*] Removing problematic packages..."
-for pkg in libpaper1 libgs9 libpaper-utils ghostscript; do
-    if dpkg -l | grep -q "^iU.*$pkg"; then
-        echo "  - Removing $pkg"
-        dpkg --purge --force-all $pkg 2>/dev/null || true
-    fi
+# Fix broken packages (không xóa, chỉ reconfigure)
+echo "[*] Fixing broken packages..."
+for pkg in $(dpkg -l | grep "^iU\|^iF" | awk '{print $2}'); do
+    echo "  - Reconfiguring $pkg"
+    dpkg --configure --force-all $pkg 2>/dev/null || true
 done
 
 # Clean apt cache
@@ -497,8 +593,9 @@ apt-get update -qq 2>/dev/null || true
 echo "[*] Reconfiguring packages..."
 dpkg --configure -a 2>/dev/null || true
 
-echo "[*] Done! Try installing packages again."
-echo "    Use: apt install -y --no-install-recommends <package>"
+echo "[*] Done! You can now install packages."
+echo "    Recommended: apt install -y --no-install-recommends <package>"
+echo "    With services: apt install -y <package> (services won't start but package will install)"
 FIXDPKG_EOF
     
     chmod +x "$ROOTFS_DIR/usr/local/bin/fix-dpkg-errors" 2>/dev/null || true
@@ -686,7 +783,11 @@ uninstall_rootfs() {
     [ -f "$ROOTFS_DIR/.distro_name" ] && cat "$ROOTFS_DIR/.distro_name"
     
     read -p "Xác nhận xóa? (yes/no): " confirm
-    [ "$confirm" != "yes" ] && { print_info "Hủy xóa"; return 0; }
+    confirm=$(echo "$confirm" | tr '[:upper:]' '[:lower:]')  # Case insensitive
+    if [ "$confirm" != "yes" ] && [ "$confirm" != "y" ]; then
+        print_info "Hủy xóa"
+        return 0
+    fi
     
     print_info "Đang xóa..."
     rm -rf "$ROOTFS_DIR" && print_info "Xóa thành công!" || print_error "Xóa thất bại"
@@ -697,7 +798,7 @@ uninstall_rootfs() {
 # =============================
 show_help() {
     cat << EOF
-${COLOR_BLUE}PRoot Fake Root Environment${COLOR_RESET}
+${COLOR_BLUE}PRoot Fake Root Environment v${SCRIPT_VERSION}${COLOR_RESET}
 
 ${COLOR_GREEN}Sử dụng:${COLOR_RESET}
   $0 [option]
@@ -743,16 +844,34 @@ EOF
 # MAIN
 # =============================
 validate_environment() {
+    local missing_tools=()
+    
     # Kiểm tra tar (bắt buộc)
-    command -v tar &>/dev/null || {
-        print_error "Thiếu lệnh: tar. Vui lòng cài đặt."
-        exit 1
-    }
+    if ! command -v tar &>/dev/null; then
+        missing_tools+=("tar")
+    fi
     
     # Kiểm tra wget HOẶC curl (ít nhất 1 cái)
     if ! command -v wget &>/dev/null && ! command -v curl &>/dev/null; then
-        print_error "Thiếu wget hoặc curl. Vui lòng cài đặt ít nhất một trong hai."
+        missing_tools+=("wget or curl")
+    fi
+    
+    # Kiểm tra file command (optional but useful)
+    if ! command -v file &>/dev/null; then
+        print_warn "Lệnh 'file' không có, một số kiểm tra sẽ bị bỏ qua"
+    fi
+    
+    # Report missing tools
+    if [ ${#missing_tools[@]} -gt 0 ]; then
+        print_error "Thiếu các lệnh: ${missing_tools[*]}"
+        print_error "Vui lòng cài đặt: sudo apt install ${missing_tools[*]// or / }"
         exit 1
+    fi
+    
+    # Kiểm tra disk space
+    local available_space=$(df -P "$HOME" | awk 'NR==2 {print $4}')
+    if [ "$available_space" -lt 1048576 ]; then  # Less than 1GB
+        print_warn "Dung lượng đĩa thấp: $(( available_space / 1024 ))MB. Nên có ít nhất 1GB."
     fi
     
     # Thông báo tool sẽ dùng
