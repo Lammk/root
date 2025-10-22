@@ -6,11 +6,8 @@
 
 - **`root.sh`** - Main installation and management script (v2.0.0)
 - **`README.md`** - This file - Complete overview
-- **`PROOT_QUICK_REFERENCE.md`** - Quick reference guide (English + Tiếng Việt)
-- **`FIX_GPG_ERRORS.md`** - Detailed troubleshooting guide (English + Tiếng Việt)
-- **`SERVICES_SUPPORT.md`** - Services installation guide (English + Tiếng Việt)
-- **`CHANGELOG.md`** - Version history and changes
-- **`OPTIMIZATION_SUMMARY.md`** - Technical details of optimizations
+- **`Getting_Started.md`** - Quick reference guide (English + Tiếng Việt)
+- **`Some_Errors.md`** - Detailed troubleshooting guide (English + Tiếng Việt)
 - **`LICENSE`** - MIT License (free to modify and redistribute!)
 
 ## 📌 Version Information
