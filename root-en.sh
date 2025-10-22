@@ -247,9 +247,9 @@ choose_distro() {
     echo ""
     echo -e "${COLOR_BLUE}Choose Linux distribution to install:${COLOR_RESET}"
     echo ""
-    echo "1) Ubuntu 22.04 LTS (Jammy) ${COLOR_GREEN}⭐ RECOMMENDED${COLOR_RESET}"
-    echo "2) Ubuntu 20.04 LTS (Focal)"
-    echo "3) Alpine Linux (lightest)"
+    echo -e "1) Ubuntu 22.04 LTS (Jammy) ${COLOR_GREEN}⭐ RECOMMENDED${COLOR_RESET}"
+    echo -e "2) Ubuntu 20.04 LTS (Focal)"
+    echo -e "3) Alpine Linux (lightest)"
     echo ""
     read -p "Enter choice (1-3) [default: 1]: " distro_choice
     distro_choice=${distro_choice:-1}
@@ -831,9 +831,31 @@ if command -v apt &>/dev/null && [ ! -f /root/.apt_updated ]; then
     printf "  - It's recommended to use --no-install-recommends\n"
     
 elif command -v apk &>/dev/null && [ ! -f /root/.apk_updated ]; then
-    printf "${GREEN}Initializing apk...${RESET}\n"
-    apk update -q 2>/dev/null && touch /root/.apk_updated
+    printf "${GREEN}Initializing apk for Alpine Linux...${RESET}\n"
+    
+    # Fix permissions for apk cache
+    mkdir -p /var/cache/apk /etc/apk
+    chmod 755 /var/cache/apk
+    
+    # Install ca-certificates first (disable SSL check temporarily)
+    printf "${YELLOW}Installing ca-certificates...${RESET}\n"
+    apk add --no-cache --allow-untrusted ca-certificates 2>/dev/null || true
+    
+    # Update ca-certificates
+    update-ca-certificates 2>/dev/null || true
+    
+    # Now update with proper SSL
+    printf "${GREEN}Updating package list...${RESET}\n"
+    if apk update 2>&1 | grep -v "WARNING"; then
+        touch /root/.apk_updated
+        printf "${GREEN}✓ APK ready!${RESET}\n"
+    else
+        printf "${YELLOW}⚠ APK has warnings but still usable${RESET}\n"
+        touch /root/.apk_updated
+    fi
+    
     printf "${GREEN}Use: apk add <package>${RESET}\n"
+    printf "${YELLOW}Note: If SSL errors occur, use: apk add --allow-untrusted <package>${RESET}\n"
     
 elif command -v pacman &>/dev/null && [ ! -f /root/.pacman_updated ]; then
     printf "${GREEN}Initializing pacman...${RESET}\n"

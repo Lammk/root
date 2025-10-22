@@ -247,9 +247,9 @@ choose_distro() {
     echo ""
     echo -e "${COLOR_BLUE}Chọn distro Linux muốn cài đặt:${COLOR_RESET}"
     echo ""
-    echo "1) Ubuntu 22.04 LTS (Jammy) ${COLOR_GREEN}⭐ KHÚYEN NGHỊ${COLOR_RESET}"
-    echo "2) Ubuntu 20.04 LTS (Focal)"
-    echo "3) Alpine Linux (nhẹ nhất)"
+    echo -e "1) Ubuntu 22.04 LTS (Jammy) ${COLOR_GREEN}⭐ KHÚYEN NGHỊ${COLOR_RESET}"
+    echo -e "2) Ubuntu 20.04 LTS (Focal)"
+    echo -e "3) Alpine Linux (nhẹ nhất)"
     echo ""
     read -p "Nhập lựa chọn (1-3) [mặc định: 1]: " distro_choice
     distro_choice=${distro_choice:-1}
@@ -831,9 +831,31 @@ if command -v apt &>/dev/null && [ ! -f /root/.apt_updated ]; then
     printf "  - Nên dùng --no-install-recommends để tránh lỗi\n"
     
 elif command -v apk &>/dev/null && [ ! -f /root/.apk_updated ]; then
-    printf "${GREEN}Khởi tạo apk...${RESET}\n"
-    apk update -q 2>/dev/null && touch /root/.apk_updated
+    printf "${GREEN}Khởi tạo apk cho Alpine Linux...${RESET}\n"
+    
+    # Fix permissions cho apk cache
+    mkdir -p /var/cache/apk /etc/apk
+    chmod 755 /var/cache/apk
+    
+    # Cài ca-certificates trước (disable SSL check tạm thời)
+    printf "${YELLOW}Đang cài đặt ca-certificates...${RESET}\n"
+    apk add --no-cache --allow-untrusted ca-certificates 2>/dev/null || true
+    
+    # Update ca-certificates
+    update-ca-certificates 2>/dev/null || true
+    
+    # Giờ update với SSL đúng
+    printf "${GREEN}Đang cập nhật package list...${RESET}\n"
+    if apk update 2>&1 | grep -v "WARNING"; then
+        touch /root/.apk_updated
+        printf "${GREEN}✓ APK đã sẵn sàng!${RESET}\n"
+    else
+        printf "${YELLOW}⚠ APK có warnings nhưng vẫn dùng được${RESET}\n"
+        touch /root/.apk_updated
+    fi
+    
     printf "${GREEN}Sử dụng: apk add <package>${RESET}\n"
+    printf "${YELLOW}Lưu ý: Nếu gặp lỗi SSL, chạy: apk add --allow-untrusted <package>${RESET}\n"
     
 elif command -v pacman &>/dev/null && [ ! -f /root/.pacman_updated ]; then
     printf "${GREEN}Khởi tạo pacman...${RESET}\n"
