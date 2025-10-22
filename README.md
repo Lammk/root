@@ -4,16 +4,20 @@
 
 ## 📁 Files
 
-- **`root.sh`** - Main installation and management script (v2.0.0)
-- **`README.md`** - This file - Complete overview
+### Scripts
+- **`root.sh`** - Vietnamese version (Phiên bản tiếng Việt) - v2.0.0
+- **`root-en.sh`** - English version - v2.0.0
+
+### Documentation
+- **`README.md`** - This file - Complete overview (English + Tiếng Việt)
 - **`Getting_Started.md`** - Quick reference guide (English + Tiếng Việt)
-- **`Some_Errors.md`** - Detailed troubleshooting guide (English + Tiếng Việt)
+- **`Some_Errors.md`** - Some errors and solutions (English + Tiếng Việt)
 - **`LICENSE`** - MIT License (free to modify and redistribute!)
 
 ## 📌 Version Information
 
 **Current Version:** 2.0.0  
-**Release Date:** 22/10/2025 (DD/MM/YYYY)  
+**Release Date:** 22/10/2025 
 **Status:** Production Ready ✅
 
 **What's New in 2.0:**
@@ -28,15 +32,30 @@ See [CHANGELOG.md](CHANGELOG.md) for full details.
 
 ## 🚀 Quick Start
 
+### Choose Your Language / Chọn Ngôn Ngữ
+
+**English Users:**
 ```bash
 # Install and start (auto-selects Ubuntu 22.04 by default)
-bash root.sh
+bash root-en.sh
 
 # Or specify options
-bash root.sh -i    # Install only
-bash root.sh -r    # Reinstall
-bash root.sh -u    # Uninstall
-bash root.sh -h    # Show help with version info
+bash root-en.sh -i    # Install only
+bash root-en.sh -r    # Reinstall
+bash root-en.sh -u    # Uninstall
+bash root-en.sh -h    # Show help
+```
+
+**Người Dùng Tiếng Việt:**
+```bash
+# Cài đặt và khởi động (tự động chọn Ubuntu 22.04)
+bash root.sh
+
+# Hoặc chỉ định tùy chọn
+bash root.sh -i    # Chỉ cài đặt
+bash root.sh -r    # Cài lại
+bash root.sh -u    # Gỡ cài đặt
+bash root.sh -h    # Hiển thị trợ giúp
 ```
 
 ## ✨ Features
@@ -291,6 +310,7 @@ bash root.sh -r
 
 - **Quick help**: `bash root.sh --help`
 - **Inside proot**: Run `fix-apt-keys --help`, `fix-dpkg-errors --help`
+- **Documentation**: Read the MD files in `/home/red/Documents/`
 
 ## 🙏 Credits
 
