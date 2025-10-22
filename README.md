@@ -60,7 +60,7 @@ bash root.sh -h    # Hiển thị trợ giúp
 
 ## ✨ Features
 
-- ✅ **7 Linux Distributions**: Ubuntu (24.04, 22.04, 20.04), Debian (12, 11), Alpine, Arch
+- ✅ **5 Linux Distributions**: Ubuntu (24.04, 22.04, 20.04), Alpine, Arch
 - ✅ **Auto-fix GPG errors**: Automatically configures GPG keys
 - ✅ **Auto-fix DPKG errors**: Prevents service startup issues
 - ✅ **Auto-fix SSL/Curl errors**: Pre-configures CA certificates
@@ -188,11 +188,10 @@ Ubuntu 22.04 LTS (Jammy) is the **recommended choice** because:
 | Distribution | Stability | Package Count | SSL Issues | Recommended |
 |-------------|-----------|---------------|------------|-------------|
 | Ubuntu 22.04 | ⭐⭐⭐⭐⭐ | 50,000+ | Rare | ✅ **YES** |
-| Ubuntu 24.04 | ⭐⭐⭐⭐ | 45,000+ | Sometimes | ⚠️ |
+| Ubuntu 24.04 | ⭐⭐⭐⭐ | 45,000+ | Sometimes | ✅ |
 | Ubuntu 20.04 | ⭐⭐⭐⭐ | 40,000+ | Rare | ✅ |
-| Debian 12 | ⭐⭐⭐ | 35,000+ | Common | ⚠️ |
 | Alpine | ⭐⭐⭐⭐ | 10,000+ | Rare | ✅ (minimal) |
-| Arch | ⭐⭐⭐ | 12,000+ | Common | ⚠️ |
+| Arch | ⭐⭐⭐ | 12,000+ | Sometimes | ⚠️ (amd64 only) |
 
 ## 🔐 Security Notes
 

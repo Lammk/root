@@ -250,16 +250,14 @@ choose_distro() {
     echo "1) Ubuntu 24.04 LTS (Noble)"
     echo "2) Ubuntu 22.04 LTS (Jammy) ${COLOR_GREEN}⭐ RECOMMENDED${COLOR_RESET}"
     echo "3) Ubuntu 20.04 LTS (Focal)"
-    echo "4) Debian 12 (Bookworm)"
-    echo "5) Debian 11 (Bullseye)"
-    echo "6) Alpine Linux (lightest)"
-    echo "7) Arch Linux"
+    echo "4) Alpine Linux (lightest)"
+    echo "5) Arch Linux (amd64 only)"
     echo ""
-    read -p "Enter choice (1-7) [default: 2]: " distro_choice
+    read -p "Enter choice (1-5) [default: 2]: " distro_choice
     distro_choice=${distro_choice:-2}
     
     # Validate input
-    if ! [[ "$distro_choice" =~ ^[1-7]$ ]]; then
+    if ! [[ "$distro_choice" =~ ^[1-5]$ ]]; then
         print_error "Invalid choice: $distro_choice"
         return 1
     fi
@@ -267,7 +265,7 @@ choose_distro() {
     case $distro_choice in
         1)
             DISTRO_NAME="Ubuntu 24.04"
-            ROOTFS_URL="http://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04-base-${ARCH_ALT}.tar.gz"
+            ROOTFS_URL="http://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.3-base-${ARCH_ALT}.tar.gz"
             ;;
         2)
             DISTRO_NAME="Ubuntu 22.04"
@@ -278,28 +276,6 @@ choose_distro() {
             ROOTFS_URL="http://cdimage.ubuntu.com/ubuntu-base/releases/20.04/release/ubuntu-base-20.04.4-base-${ARCH_ALT}.tar.gz"
             ;;
         4)
-            DISTRO_NAME="Debian 12"
-            # Using LXC images for Debian
-            case "$ARCH_ALT" in
-                amd64) ROOTFS_URL="https://images.linuxcontainers.org/images/debian/bookworm/amd64/default/rootfs.tar.xz" ;;
-                arm64) ROOTFS_URL="https://images.linuxcontainers.org/images/debian/bookworm/arm64/default/rootfs.tar.xz" ;;
-                armhf) ROOTFS_URL="https://images.linuxcontainers.org/images/debian/bookworm/armhf/default/rootfs.tar.xz" ;;
-                i386) ROOTFS_URL="https://images.linuxcontainers.org/images/debian/bookworm/i386/default/rootfs.tar.xz" ;;
-                *) print_error "Unsupported architecture for Debian: $ARCH_ALT"; return 1 ;;
-            esac
-            ;;
-        5)
-            DISTRO_NAME="Debian 11"
-            # Using LXC images for Debian 11
-            case "$ARCH_ALT" in
-                amd64) ROOTFS_URL="https://images.linuxcontainers.org/images/debian/bullseye/amd64/default/rootfs.tar.xz" ;;
-                arm64) ROOTFS_URL="https://images.linuxcontainers.org/images/debian/bullseye/arm64/default/rootfs.tar.xz" ;;
-                armhf) ROOTFS_URL="https://images.linuxcontainers.org/images/debian/bullseye/armhf/default/rootfs.tar.xz" ;;
-                i386) ROOTFS_URL="https://images.linuxcontainers.org/images/debian/bullseye/i386/default/rootfs.tar.xz" ;;
-                *) print_error "Unsupported architecture for Debian: $ARCH_ALT"; return 1 ;;
-            esac
-            ;;
-        6)
             DISTRO_NAME="Alpine Linux"
             # Validate ALPINE_ARCH
             [ -z "$ALPINE_ARCH" ] && {
@@ -309,13 +285,12 @@ choose_distro() {
             # Updated to latest Alpine version
             ROOTFS_URL="https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/${ALPINE_ARCH}/alpine-minirootfs-3.20.3-${ALPINE_ARCH}.tar.gz"
             ;;
-        7)
+        5)
             DISTRO_NAME="Arch Linux"
-            # Using LXC images for Arch Linux
+            # Using Arch Linux Bootstrap
             case "$ARCH_ALT" in
-                amd64) ROOTFS_URL="https://images.linuxcontainers.org/images/archlinux/current/amd64/default/rootfs.tar.xz" ;;
-                arm64) ROOTFS_URL="https://images.linuxcontainers.org/images/archlinux/current/arm64/default/rootfs.tar.xz" ;;
-                *) print_error "Unsupported architecture for Arch Linux: $ARCH_ALT"; return 1 ;;
+                amd64) ROOTFS_URL="https://geo.mirror.pkgbuild.com/iso/latest/archlinux-bootstrap-x86_64.tar.gz" ;;
+                *) print_error "Unsupported architecture for Arch Linux: $ARCH_ALT (only amd64 supported)"; return 1 ;;
             esac
             ;;
         *)
@@ -882,7 +857,13 @@ fi
 
 printf "\n${CYAN}Type 'exit' to quit${RESET}\n\n"
 export PS1='\[\033[01;31m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\# '
-exec /bin/bash --norc
+
+# Detect shell - Alpine uses /bin/sh, others use /bin/bash
+if [ -f /bin/bash ]; then
+    exec /bin/bash --norc
+else
+    exec /bin/sh
+fi
 STARTUP_EOF
     chmod +x "$ROOTFS_DIR/root/.startup.sh"
 }
@@ -918,7 +899,14 @@ start_fake_root() {
     fi
     
     bind_args+=("--kill-on-exit")
-    bind_args+=("/bin/bash")
+    
+    # Detect shell - Alpine uses /bin/sh, others use /bin/bash
+    if [ -f "$ROOTFS_DIR/bin/bash" ]; then
+        bind_args+=("/bin/bash")
+    else
+        bind_args+=("/bin/sh")
+    fi
+    
     bind_args+=("/root/.startup.sh")
     
     exec "$PROOT_BIN" "${bind_args[@]}"
