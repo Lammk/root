@@ -16,7 +16,7 @@
 ## 📌 Version Information
 
 **Current Version:** 2.0.0  
-**Release Date:** 2025-01-22  
+**Release Date:** 22/10/2025 (DD/MM/YYYY)  
 **Status:** Production Ready ✅
 
 **What's New in 2.0:**
