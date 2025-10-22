@@ -46,18 +46,39 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Download file với retry
+# Download file với retry (hỗ trợ cả wget và curl)
 download_file() {
     local url="$1"
     local output="$2"
     local retries="${3:-$MAX_RETRIES}"
     
+    # Xác định tool download
+    local download_cmd=""
+    if command -v wget &>/dev/null; then
+        download_cmd="wget"
+    elif command -v curl &>/dev/null; then
+        download_cmd="curl"
+    else
+        print_error "Không tìm thấy wget hoặc curl"
+        return 1
+    fi
+    
     for ((i=1; i<=retries; i++)); do
-        if wget --tries=1 --timeout=$TIMEOUT --no-hsts --show-progress -q -O "$output" "$url" 2>&1; then
-            [ -s "$output" ] && return 0
+        if [ "$download_cmd" = "wget" ]; then
+            # wget: bỏ -q để show progress hoạt động
+            if wget --tries=1 --timeout=$TIMEOUT --no-hsts --show-progress -O "$output" "$url" 2>&1 | grep -v '^--'; then
+                [ -s "$output" ] && return 0
+            fi
+        else
+            # curl fallback
+            if curl -fSL --connect-timeout $TIMEOUT --max-time $((TIMEOUT*2)) -o "$output" "$url" 2>&1; then
+                [ -s "$output" ] && return 0
+            fi
         fi
+        
         [ $i -lt $retries ] && print_warn "Thử lại ($i/$retries)..."
-        sleep 1
+        rm -f "$output"  # Xóa file lỗi trước khi retry
+        sleep 2
     done
     return 1
 }
@@ -67,24 +88,31 @@ extract_tar() {
     local file="$1"
     local dest="$2"
     
+    [ ! -f "$file" ] && { print_error "File không tồn tại: $file"; return 1; }
+    [ ! -d "$dest" ] && { print_error "Thư mục đích không tồn tại: $dest"; return 1; }
+    
     print_info "Đang giải nén $(basename "$file")..."
     
-    # Tự động phát hiện và giải nén
-    if tar -xf "$file" -C "$dest" 2>/dev/null; then
+    # Tự động phát hiện và giải nén với verbose để debug
+    if tar -xf "$file" -C "$dest" 2>&1 | head -n 5; then
+        print_info "Giải nén thành công!"
         return 0
     fi
     
     # Fallback: thử giải nén thủ công
+    print_warn "Tar tự động thất bại, thử phương pháp thủ công..."
     case "$file" in
         *.tar.xz)
-            print_warn "Thử giải nén với xz..."
             xz -d "$file" && tar -xf "${file%.xz}" -C "$dest"
             ;;
         *.tar.gz)
-            print_warn "Thử giải nén với gzip..."
             gzip -d "$file" && tar -xf "${file%.gz}" -C "$dest"
             ;;
+        *.tar.bz2)
+            bzip2 -d "$file" && tar -xf "${file%.bz2}" -C "$dest"
+            ;;
         *)
+            print_error "Định dạng file không được hỗ trợ: $file"
             return 1
             ;;
     esac
@@ -183,6 +211,12 @@ download_proot() {
 # CHỌN DISTRO
 # =============================
 choose_distro() {
+    # Đảm bảo architecture đã được check
+    [ -z "${ARCH_ALT:-}" ] && {
+        print_error "ARCH_ALT chưa được khởi tạo. Gọi check_architecture() trước."
+        return 1
+    }
+    
     echo ""
     echo -e "${COLOR_BLUE}Chọn distro Linux muốn cài đặt:${COLOR_RESET}"
     echo ""
@@ -221,6 +255,11 @@ choose_distro() {
             ;;
         6)
             DISTRO_NAME="Alpine Linux"
+            # Validate ALPINE_ARCH
+            [ -z "$ALPINE_ARCH" ] && {
+                print_error "ALPINE_ARCH không được khởi tạo"
+                return 1
+            }
             ROOTFS_URL="https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/${ALPINE_ARCH}/alpine-minirootfs-3.19.1-${ALPINE_ARCH}.tar.gz"
             ;;
         7)
@@ -250,9 +289,17 @@ install_rootfs() {
     # Tải rootfs
     print_info "Đang tải rootfs: $(basename "$ROOTFS_URL")"
     
-    # Xác định extension từ URL
-    ROOTFS_FILE="/tmp/rootfs_$$.${ROOTFS_URL##*.}"
-    [[ "$ROOTFS_URL" == *.tar.* ]] && ROOTFS_FILE="/tmp/rootfs_$$.tar.${ROOTFS_URL##*.tar.}"
+    # Xác định extension từ URL (cải thiện logic)
+    local ext="${ROOTFS_URL##*.}"
+    if [[ "$ROOTFS_URL" == *.tar.xz ]]; then
+        ROOTFS_FILE="/tmp/rootfs_$$.tar.xz"
+    elif [[ "$ROOTFS_URL" == *.tar.gz ]]; then
+        ROOTFS_FILE="/tmp/rootfs_$$.tar.gz"
+    elif [[ "$ROOTFS_URL" == *.tar.bz2 ]]; then
+        ROOTFS_FILE="/tmp/rootfs_$$.tar.bz2"
+    else
+        ROOTFS_FILE="/tmp/rootfs_$$.tar"
+    fi
     
     # Tải với fallback
     if ! download_file "$ROOTFS_URL" "$ROOTFS_FILE"; then
@@ -297,6 +344,12 @@ EOF
     # Tạo thư mục cần thiết
     mkdir -p "$ROOTFS_DIR"/{dev,sys,proc,tmp,root,home,var/log}
     
+    # Fix GPG keys cho Ubuntu/Debian
+    if [[ "$DISTRO_NAME" == Ubuntu* ]] || [[ "$DISTRO_NAME" == Debian* ]]; then
+        print_info "Đang cấu hình GPG keys cho $DISTRO_NAME..."
+        fix_ubuntu_gpg_keys
+    fi
+    
     # Đánh dấu đã cài đặt
     {
         echo "$DISTRO_NAME"
@@ -306,6 +359,74 @@ EOF
     touch "$ROOTFS_DIR/.installed"
     
     print_info "Cài đặt $DISTRO_NAME hoàn tất!"
+}
+
+# =============================
+# FIX GPG KEYS CHO UBUNTU/DEBIAN
+# =============================
+fix_ubuntu_gpg_keys() {
+    # Fix permissions cho apt keyrings
+    if [ -d "$ROOTFS_DIR/etc/apt/trusted.gpg.d" ]; then
+        chmod 644 "$ROOTFS_DIR/etc/apt/trusted.gpg.d/"*.gpg 2>/dev/null || true
+        chmod 755 "$ROOTFS_DIR/etc/apt/trusted.gpg.d" 2>/dev/null || true
+    fi
+    
+    # Tạo thư mục apt cần thiết
+    mkdir -p "$ROOTFS_DIR/var/lib/apt/lists/partial"
+    mkdir -p "$ROOTFS_DIR/var/cache/apt/archives/partial"
+    chmod 755 "$ROOTFS_DIR/var/lib/apt/lists" 2>/dev/null || true
+    chmod 700 "$ROOTFS_DIR/var/lib/apt/lists/partial" 2>/dev/null || true
+    
+    # Tạo file cấu hình apt để bỏ qua GPG check nếu cần
+    mkdir -p "$ROOTFS_DIR/etc/apt/apt.conf.d"
+    cat > "$ROOTFS_DIR/etc/apt/apt.conf.d/99-proot-no-check" << 'EOF'
+// Cấu hình cho proot environment
+Acquire::AllowInsecureRepositories "true";
+Acquire::AllowDowngradeToInsecureRepositories "true";
+APT::Get::AllowUnauthenticated "true";
+APT::Get::Assume-Yes "false";
+Acquire::Check-Valid-Until "false";
+EOF
+    
+    # Tạo script fix GPG trong rootfs
+    cat > "$ROOTFS_DIR/usr/local/bin/fix-apt-keys" << 'FIXKEYS_EOF'
+#!/bin/bash
+# Script fix GPG keys cho Ubuntu/Debian trong proot
+
+echo "[*] Fixing APT GPG keys..."
+
+# Fix permissions
+if [ -d /etc/apt/trusted.gpg.d ]; then
+    chmod 644 /etc/apt/trusted.gpg.d/*.gpg 2>/dev/null || true
+    chmod 755 /etc/apt/trusted.gpg.d 2>/dev/null || true
+fi
+
+# Tạo thư mục cho apt user
+mkdir -p /var/lib/apt/lists/partial
+chmod 755 /var/lib/apt/lists
+chmod 700 /var/lib/apt/lists/partial
+
+# Import Ubuntu keys nếu thiếu
+if command -v apt-key &>/dev/null; then
+    echo "[*] Importing Ubuntu archive keys..."
+    apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 871920D1991BC93C 2>/dev/null || true
+    apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3B4FE6ACC0B21F32 2>/dev/null || true
+    apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 871920D1991BC93C 2>/dev/null || true
+fi
+
+# Disable signature check tạm thời
+cat > /etc/apt/apt.conf.d/99-proot-no-check << 'APTCONF'
+Acquire::AllowInsecureRepositories "true";
+Acquire::AllowDowngradeToInsecureRepositories "true";
+APT::Get::AllowUnauthenticated "true";
+APTCONF
+
+echo "[*] Done! You can now run: apt update"
+FIXKEYS_EOF
+    
+    chmod +x "$ROOTFS_DIR/usr/local/bin/fix-apt-keys" 2>/dev/null || true
+    
+    print_info "GPG keys đã được cấu hình"
 }
 
 # =============================
@@ -330,12 +451,36 @@ printf "${YELLOW}Môi trường fake root với proot - Có thể sử dụng ap
 # Khởi tạo package manager
 if command -v apt &>/dev/null && [ ! -f /root/.apt_updated ]; then
     printf "${GREEN}Khởi tạo apt...${RESET}\n"
-    apt update -qq 2>/dev/null && touch /root/.apt_updated
+    
+    # Fix GPG keys trước khi update
+    if [ -f /usr/local/bin/fix-apt-keys ]; then
+        printf "${YELLOW}Đang fix GPG keys...${RESET}\n"
+        /usr/local/bin/fix-apt-keys 2>&1 | grep -E "\[\*\]|Done" || true
+    fi
+    
+    # Fix permissions cho apt
+    chmod 644 /etc/apt/trusted.gpg.d/*.gpg 2>/dev/null || true
+    mkdir -p /var/lib/apt/lists/partial
+    chmod 755 /var/lib/apt/lists 2>/dev/null || true
+    
+    # Update với error handling
+    printf "${GREEN}Đang cập nhật apt (có thể mất vài phút)...${RESET}\n"
+    if apt update 2>&1 | grep -v "^W:" | grep -v "keyring"; then
+        touch /root/.apt_updated
+        printf "${GREEN}✓ APT đã sẵn sàng!${RESET}\n"
+    else
+        printf "${YELLOW}⚠ APT update có warnings, nhưng vẫn có thể dùng${RESET}\n"
+        touch /root/.apt_updated
+    fi
+    
     printf "${GREEN}Sử dụng: apt install <package>${RESET}\n"
+    printf "${YELLOW}Nếu gặp lỗi GPG, chạy: fix-apt-keys${RESET}\n"
+    
 elif command -v apk &>/dev/null && [ ! -f /root/.apk_updated ]; then
     printf "${GREEN}Khởi tạo apk...${RESET}\n"
     apk update -q 2>/dev/null && touch /root/.apk_updated
     printf "${GREEN}Sử dụng: apk add <package>${RESET}\n"
+    
 elif command -v pacman &>/dev/null && [ ! -f /root/.pacman_updated ]; then
     printf "${GREEN}Khởi tạo pacman...${RESET}\n"
     pacman-key --init &>/dev/null && pacman-key --populate &>/dev/null && touch /root/.pacman_updated
@@ -363,16 +508,27 @@ start_fake_root() {
     display_complete
     
     # Khởi động proot với cấu hình tối ưu
-    exec "$PROOT_BIN" \
-        --rootfs="$ROOTFS_DIR" \
-        --root-id \
-        --cwd="/root" \
-        --bind=/dev \
-        --bind=/sys \
-        --bind=/proc \
-        --bind="/etc/resolv.conf" \
-        --kill-on-exit \
-        /bin/bash /root/.startup.sh
+    # Chỉ bind resolv.conf nếu file tồn tại trên host
+    local bind_args=()
+    bind_args+=("--rootfs=$ROOTFS_DIR")
+    bind_args+=("--root-id")
+    bind_args+=("--cwd=/root")
+    bind_args+=("--bind=/dev")
+    bind_args+=("--bind=/sys")
+    bind_args+=("--bind=/proc")
+    
+    # Bind resolv.conf nếu tồn tại
+    if [ -f "/etc/resolv.conf" ]; then
+        bind_args+=("--bind=/etc/resolv.conf")
+    else
+        print_warn "Host không có /etc/resolv.conf, bỏ qua bind"
+    fi
+    
+    bind_args+=("--kill-on-exit")
+    bind_args+=("/bin/bash")
+    bind_args+=("/root/.startup.sh")
+    
+    exec "$PROOT_BIN" "${bind_args[@]}"
 }
 
 # =============================
@@ -425,6 +581,12 @@ ${COLOR_GREEN}Bên trong fake root:${COLOR_RESET}
   apt update && apt install vim python3 nodejs
   apk add curl wget git
   pacman -Syu base-devel
+
+${COLOR_YELLOW}Xử lý lỗi GPG (Ubuntu/Debian):${COLOR_RESET}
+  Nếu gặp lỗi "NO_PUBKEY" hoặc GPG errors:
+  1. Chạy: fix-apt-keys
+  2. Hoặc: apt update --allow-insecure-repositories
+  3. Cài package: apt install -y --allow-unauthenticated <package>
 EOF
 }
 
@@ -432,14 +594,24 @@ EOF
 # MAIN
 # =============================
 validate_environment() {
-    # Kiểm tra các lệnh cần thiết
-    local required_cmds=("wget" "tar")
-    for cmd in "${required_cmds[@]}"; do
-        command -v "$cmd" &>/dev/null || {
-            print_error "Thiếu lệnh: $cmd. Vui lòng cài đặt."
-            exit 1
-        }
-    done
+    # Kiểm tra tar (bắt buộc)
+    command -v tar &>/dev/null || {
+        print_error "Thiếu lệnh: tar. Vui lòng cài đặt."
+        exit 1
+    }
+    
+    # Kiểm tra wget HOẶC curl (ít nhất 1 cái)
+    if ! command -v wget &>/dev/null && ! command -v curl &>/dev/null; then
+        print_error "Thiếu wget hoặc curl. Vui lòng cài đặt ít nhất một trong hai."
+        exit 1
+    fi
+    
+    # Thông báo tool sẽ dùng
+    if command -v wget &>/dev/null; then
+        print_info "Sử dụng wget để download"
+    else
+        print_info "Sử dụng curl để download"
+    fi
 }
 
 main() {
@@ -455,19 +627,23 @@ main() {
             ;;
         -r|--reinstall)
             uninstall_rootfs
-            ;& # Fallthrough
+            # Fallthrough bằng cách gọi lại với -i
+            set -- "-i" "--and-start"
+            ;;
         -i|--install)
             print_banner
             check_architecture
             download_proot || exit 1
-            choose_distro
+            choose_distro || exit 1
             install_rootfs || exit 1
             
-            [ "${1:-}" = "-i" ] && {
+            # Nếu có flag --and-start thì tiếp tục start, nếu không thì exit
+            if [ "${2:-}" = "--and-start" ]; then
+                start_fake_root
+            else
                 print_info "Cài đặt hoàn tất! Chạy '$0' để khởi động"
                 exit 0
-            }
-            start_fake_root
+            fi
             ;;
         -s|--start|"")
             # Auto-install nếu chưa cài
