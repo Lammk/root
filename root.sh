@@ -7,11 +7,13 @@ set -euo pipefail
 # Có thể sử dụng apt và các công cụ system
 # =============================
 
-ROOTFS_DIR="$HOME/.fakeroot-proot"
+# Cấu hình
+ROOTFS_DIR="${FAKEROOT_DIR:-$HOME/.fakeroot-proot}"
 PROOT_BIN="$HOME/.local/bin/proot"
-MAX_RETRIES=50
-TIMEOUT=10
+MAX_RETRIES=3
+TIMEOUT=30
 ARCH=$(uname -m)
+ALPINE_ARCH=""
 
 COLOR_RED='\033[0;31m'
 COLOR_GREEN='\033[0;32m'
@@ -25,15 +27,67 @@ COLOR_RESET='\033[0m'
 # FUNCTIONS
 # =============================
 print_info() {
-    echo -e "${COLOR_GREEN}[INFO]${COLOR_RESET} $1"
+    echo -e "${COLOR_GREEN}[INFO]${COLOR_RESET} $1" >&2
 }
 
 print_warn() {
-    echo -e "${COLOR_YELLOW}[WARN]${COLOR_RESET} $1"
+    echo -e "${COLOR_YELLOW}[WARN]${COLOR_RESET} $1" >&2
 }
 
 print_error() {
-    echo -e "${COLOR_RED}[ERROR]${COLOR_RESET} $1"
+    echo -e "${COLOR_RED}[ERROR]${COLOR_RESET} $1" >&2
+}
+
+# Cleanup khi exit
+cleanup() {
+    local exit_code=$?
+    [ -n "${ROOTFS_FILE:-}" ] && rm -f "$ROOTFS_FILE" "${ROOTFS_FILE%.xz}" "${ROOTFS_FILE%.gz}" 2>/dev/null
+    return $exit_code
+}
+trap cleanup EXIT INT TERM
+
+# Download file với retry
+download_file() {
+    local url="$1"
+    local output="$2"
+    local retries="${3:-$MAX_RETRIES}"
+    
+    for ((i=1; i<=retries; i++)); do
+        if wget --tries=1 --timeout=$TIMEOUT --no-hsts --show-progress -q -O "$output" "$url" 2>&1; then
+            [ -s "$output" ] && return 0
+        fi
+        [ $i -lt $retries ] && print_warn "Thử lại ($i/$retries)..."
+        sleep 1
+    done
+    return 1
+}
+
+# Giải nén file tar
+extract_tar() {
+    local file="$1"
+    local dest="$2"
+    
+    print_info "Đang giải nén $(basename "$file")..."
+    
+    # Tự động phát hiện và giải nén
+    if tar -xf "$file" -C "$dest" 2>/dev/null; then
+        return 0
+    fi
+    
+    # Fallback: thử giải nén thủ công
+    case "$file" in
+        *.tar.xz)
+            print_warn "Thử giải nén với xz..."
+            xz -d "$file" && tar -xf "${file%.xz}" -C "$dest"
+            ;;
+        *.tar.gz)
+            print_warn "Thử giải nén với gzip..."
+            gzip -d "$file" && tar -xf "${file%.gz}" -C "$dest"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 print_banner() {
@@ -64,18 +118,25 @@ display_complete() {
 # KIỂM TRA KIẾN TRÚC
 # =============================
 check_architecture() {
+    # Chỉ chạy một lần
+    [ -n "${ARCH_ALT:-}" ] && return 0
+    
     case "$ARCH" in
         x86_64)
             ARCH_ALT="amd64"
+            ALPINE_ARCH="x86_64"
             ;;
         aarch64|arm64)
             ARCH_ALT="arm64"
+            ALPINE_ARCH="aarch64"
             ;;
         armv7l|armhf)
             ARCH_ALT="armhf"
+            ALPINE_ARCH="armv7"
             ;;
         i386|i686)
             ARCH_ALT="i386"
+            ALPINE_ARCH="x86"
             ;;
         *)
             print_error "Kiến trúc CPU không được hỗ trợ: $ARCH"
@@ -89,25 +150,27 @@ check_architecture() {
 # TẢI PROOT
 # =============================
 download_proot() {
-    print_info "Đang tải proot cho $ARCH..."
+    # Kiểm tra đã có proot chưa
+    if [ -x "$PROOT_BIN" ]; then
+        print_info "Proot đã tồn tại, bỏ qua tải xuống"
+        return 0
+    fi
     
+    print_info "Đang tải proot cho $ARCH..."
     mkdir -p "$(dirname "$PROOT_BIN")"
     
-    # Thử nhiều nguồn proot
     local PROOT_URLS=(
-        "https://raw.githubusercontent.com/foxytouxxx/freeroot/main/proot-${ARCH}"
         "https://github.com/proot-me/proot/releases/download/v5.3.0/proot-v5.3.0-${ARCH}-static"
+        "https://raw.githubusercontent.com/foxytouxxx/freeroot/main/proot-${ARCH}"
         "https://github.com/termux/proot/releases/latest/download/proot-${ARCH}"
     )
     
     for url in "${PROOT_URLS[@]}"; do
-        print_info "Đang thử tải từ: $url"
-        if wget --tries=$MAX_RETRIES --timeout=$TIMEOUT --no-hsts -O "$PROOT_BIN" "$url" 2>/dev/null; then
-            if [ -s "$PROOT_BIN" ]; then
-                chmod +x "$PROOT_BIN"
-                print_info "Tải proot thành công!"
-                return 0
-            fi
+        print_info "Đang thử: $(basename "$url")"
+        if download_file "$url" "$PROOT_BIN"; then
+            chmod +x "$PROOT_BIN"
+            print_info "Tải proot thành công!"
+            return 0
         fi
         rm -f "$PROOT_BIN"
     done
@@ -149,19 +212,20 @@ choose_distro() {
             ;;
         4)
             DISTRO_NAME="Debian 12"
-            ROOTFS_URL="https://github.com/termux/proot-distro/releases/download/v4.0.1/debian-${ARCH_ALT}-pd-v4.0.1.tar.xz"
+            # Debian sử dụng amd64, arm64, armhf, i386
+            ROOTFS_URL="https://github.com/termux/proot-distro/releases/download/v4.13.0/debian-${ARCH_ALT}-pd-v4.13.0.tar.xz"
             ;;
         5)
             DISTRO_NAME="Debian 11"
-            ROOTFS_URL="https://github.com/termux/proot-distro/releases/download/v3.10.0/debian-${ARCH_ALT}-pd-v3.10.0.tar.xz"
+            ROOTFS_URL="https://github.com/termux/proot-distro/releases/download/v4.13.0/debian-${ARCH_ALT}-pd-v4.13.0.tar.xz"
             ;;
         6)
             DISTRO_NAME="Alpine Linux"
-            ROOTFS_URL="https://dl-cdn.alpinelinux.org/alpine/v3.18/releases/${ARCH}/alpine-minirootfs-3.18.0-${ARCH}.tar.gz"
+            ROOTFS_URL="https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/${ALPINE_ARCH}/alpine-minirootfs-3.19.1-${ALPINE_ARCH}.tar.gz"
             ;;
         7)
             DISTRO_NAME="Arch Linux"
-            ROOTFS_URL="https://github.com/termux/proot-distro/releases/download/v4.0.1/archlinux-${ARCH_ALT}-pd-v4.0.1.tar.xz"
+            ROOTFS_URL="https://github.com/termux/proot-distro/releases/download/v4.13.0/archlinux-${ARCH_ALT}-pd-v4.13.0.tar.xz"
             ;;
         *)
             print_error "Lựa chọn không hợp lệ"
@@ -184,23 +248,41 @@ install_rootfs() {
     mkdir -p "$ROOTFS_DIR"
     
     # Tải rootfs
-    print_info "Đang tải rootfs từ: $ROOTFS_URL"
-    local ROOTFS_FILE="/tmp/rootfs_$$.tar.gz"
+    print_info "Đang tải rootfs: $(basename "$ROOTFS_URL")"
     
-    if ! wget --tries=$MAX_RETRIES --timeout=$TIMEOUT --no-hsts -O "$ROOTFS_FILE" "$ROOTFS_URL"; then
-        print_error "Không thể tải rootfs"
+    # Xác định extension từ URL
+    ROOTFS_FILE="/tmp/rootfs_$$.${ROOTFS_URL##*.}"
+    [[ "$ROOTFS_URL" == *.tar.* ]] && ROOTFS_FILE="/tmp/rootfs_$$.tar.${ROOTFS_URL##*.tar.}"
+    
+    # Tải với fallback
+    if ! download_file "$ROOTFS_URL" "$ROOTFS_FILE"; then
+        print_error "Không thể tải rootfs chính"
+        
+        # URL dự phòng
+        case "$DISTRO_NAME" in
+            "Alpine Linux")
+                print_info "Thử Alpine 3.18.4..."
+                ROOTFS_URL="https://dl-cdn.alpinelinux.org/alpine/v3.18/releases/${ALPINE_ARCH}/alpine-minirootfs-3.18.4-${ALPINE_ARCH}.tar.gz"
+                ROOTFS_FILE="/tmp/rootfs_$$.tar.gz"
+                download_file "$ROOTFS_URL" "$ROOTFS_FILE" || return 1
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    fi
+    
+    # Kiểm tra file
+    if [ ! -s "$ROOTFS_FILE" ]; then
+        print_error "File rootfs không hợp lệ"
         return 1
     fi
     
     # Giải nén
-    print_info "Đang giải nén rootfs..."
-    if [[ "$ROOTFS_FILE" == *.tar.xz ]]; then
-        tar -xJf "$ROOTFS_FILE" -C "$ROOTFS_DIR" 2>/dev/null || tar -xf "$ROOTFS_FILE" -C "$ROOTFS_DIR"
-    else
-        tar -xzf "$ROOTFS_FILE" -C "$ROOTFS_DIR" 2>/dev/null || tar -xf "$ROOTFS_FILE" -C "$ROOTFS_DIR"
-    fi
-    
-    rm -f "$ROOTFS_FILE"
+    extract_tar "$ROOTFS_FILE" "$ROOTFS_DIR" || {
+        print_error "Không thể giải nén rootfs"
+        return 1
+    }
     
     # Cấu hình DNS
     print_info "Đang cấu hình DNS..."
@@ -213,11 +295,15 @@ nameserver 8.8.4.4
 EOF
     
     # Tạo thư mục cần thiết
-    mkdir -p "$ROOTFS_DIR"/{dev,sys,proc,tmp,root,home}
+    mkdir -p "$ROOTFS_DIR"/{dev,sys,proc,tmp,root,home,var/log}
     
     # Đánh dấu đã cài đặt
+    {
+        echo "$DISTRO_NAME"
+        echo "Installed: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "Architecture: $ARCH ($ARCH_ALT)"
+    } > "$ROOTFS_DIR/.distro_name"
     touch "$ROOTFS_DIR/.installed"
-    echo "$DISTRO_NAME" > "$ROOTFS_DIR/.distro_name"
     
     print_info "Cài đặt $DISTRO_NAME hoàn tất!"
 }
@@ -228,72 +314,38 @@ EOF
 create_startup_script() {
     cat > "$ROOTFS_DIR/root/.startup.sh" << 'STARTUP_EOF'
 #!/bin/bash
+set +e  # Không exit khi có lỗi
 
-# Màu sắc
-GREEN='\033[0;32m'
-CYAN='\033[0;36m'
-YELLOW='\033[1;33m'
-RESET='\033[0m'
+GREEN='\033[0;32m' CYAN='\033[0;36m' YELLOW='\033[1;33m' RESET='\033[0m'
 
 clear
-echo -e "${CYAN}╔══════════════════════════════════════════════════════╗${RESET}"
-echo -e "${CYAN}║                                                      ║${RESET}"
-echo -e "${CYAN}║           CHÀO MỪNG ĐẾN FAKE ROOT!                 ║${RESET}"
-echo -e "${CYAN}║                                                      ║${RESET}"
-echo -e "${CYAN}╚══════════════════════════════════════════════════════╝${RESET}"
-echo ""
-echo -e "${GREEN}Thông tin hệ thống:${RESET}"
-echo -e "  OS: $(cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d'"' -f2 || echo 'Unknown')"
-echo -e "  Kernel: $(uname -r)"
-echo -e "  Arch: $(uname -m)"
-echo -e "  User: $(whoami) (UID: $(id -u))"
-echo ""
-echo -e "${YELLOW}Bạn đang ở trong môi trường fake root với proot${RESET}"
-echo -e "${YELLOW}Có thể sử dụng: apt, dpkg, và các công cụ system${RESET}"
-echo ""
+printf "${CYAN}╔══════════════════════════════════════════════════════╗\n║           CHÀO MỬNG ĐẾN FAKE ROOT!                 ║\n╚══════════════════════════════════════════════════════╝${RESET}\n\n"
 
-# Cập nhật apt nếu là Ubuntu/Debian
-if command -v apt &>/dev/null; then
-    if [ ! -f /root/.apt_updated ]; then
-        echo -e "${GREEN}Đang cập nhật apt lần đầu...${RESET}"
-        apt update 2>/dev/null || true
-        touch /root/.apt_updated
-    fi
-    echo -e "${GREEN}Để cài đặt packages: apt install <package>${RESET}"
+printf "${GREEN}Thông tin hệ thống:${RESET}\n"
+printf "  OS: %s\n" "$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d'"' -f2 || echo 'Unknown')"
+printf "  Kernel: %s | Arch: %s | User: %s (UID: %s)\n\n" "$(uname -r)" "$(uname -m)" "$(whoami)" "$(id -u)"
+
+printf "${YELLOW}Môi trường fake root với proot - Có thể sử dụng apt/apk/pacman${RESET}\n\n"
+
+# Khởi tạo package manager
+if command -v apt &>/dev/null && [ ! -f /root/.apt_updated ]; then
+    printf "${GREEN}Khởi tạo apt...${RESET}\n"
+    apt update -qq 2>/dev/null && touch /root/.apt_updated
+    printf "${GREEN}Sử dụng: apt install <package>${RESET}\n"
+elif command -v apk &>/dev/null && [ ! -f /root/.apk_updated ]; then
+    printf "${GREEN}Khởi tạo apk...${RESET}\n"
+    apk update -q 2>/dev/null && touch /root/.apk_updated
+    printf "${GREEN}Sử dụng: apk add <package>${RESET}\n"
+elif command -v pacman &>/dev/null && [ ! -f /root/.pacman_updated ]; then
+    printf "${GREEN}Khởi tạo pacman...${RESET}\n"
+    pacman-key --init &>/dev/null && pacman-key --populate &>/dev/null && touch /root/.pacman_updated
+    printf "${GREEN}Sử dụng: pacman -S <package>${RESET}\n"
 fi
 
-# Cập nhật apk nếu là Alpine
-if command -v apk &>/dev/null; then
-    if [ ! -f /root/.apk_updated ]; then
-        echo -e "${GREEN}Đang cập nhật apk...${RESET}"
-        apk update 2>/dev/null || true
-        touch /root/.apk_updated
-    fi
-    echo -e "${GREEN}Để cài đặt packages: apk add <package>${RESET}"
-fi
-
-# Cập nhật pacman nếu là Arch
-if command -v pacman &>/dev/null; then
-    if [ ! -f /root/.pacman_updated ]; then
-        echo -e "${GREEN}Đang khởi tạo pacman keyring...${RESET}"
-        pacman-key --init 2>/dev/null || true
-        pacman-key --populate 2>/dev/null || true
-        touch /root/.pacman_updated
-    fi
-    echo -e "${GREEN}Để cài đặt packages: pacman -S <package>${RESET}"
-fi
-
-echo ""
-echo -e "${CYAN}Gõ 'exit' để thoát${RESET}"
-echo ""
-
-# Set prompt màu đỏ cho root
+printf "\n${CYAN}Gõ 'exit' để thoát${RESET}\n\n"
 export PS1='\[\033[01;31m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\# '
-
-# Chạy bash
 exec /bin/bash --norc
 STARTUP_EOF
-    
     chmod +x "$ROOTFS_DIR/root/.startup.sh"
 }
 
@@ -303,18 +355,14 @@ STARTUP_EOF
 start_fake_root() {
     print_info "Đang khởi động fake root environment..."
     
-    # Tạo script khởi động
+    # Validate
+    [ ! -x "$PROOT_BIN" ] && { print_error "proot không khả dụng"; exit 1; }
+    [ ! -d "$ROOTFS_DIR" ] && { print_error "Rootfs không tồn tại"; exit 1; }
+    
     create_startup_script
-    
-    # Kiểm tra proot
-    if [ ! -x "$PROOT_BIN" ]; then
-        print_error "proot không tồn tại hoặc không thể thực thi"
-        exit 1
-    fi
-    
     display_complete
     
-    # Khởi động proot
+    # Khởi động proot với cấu hình tối ưu
     exec "$PROOT_BIN" \
         --rootfs="$ROOTFS_DIR" \
         --root-id \
@@ -322,7 +370,7 @@ start_fake_root() {
         --bind=/dev \
         --bind=/sys \
         --bind=/proc \
-        --bind=/etc/resolv.conf \
+        --bind="/etc/resolv.conf" \
         --kill-on-exit \
         /bin/bash /root/.startup.sh
 }
@@ -331,16 +379,16 @@ start_fake_root() {
 # XÓA ROOTFS
 # =============================
 uninstall_rootfs() {
-    print_warn "CẢNH BÁO: Điều này sẽ xóa toàn bộ rootfs!"
-    read -p "Bạn có chắc chắn muốn xóa? (yes/no): " confirm
+    [ ! -d "$ROOTFS_DIR" ] && { print_info "Rootfs chưa được cài đặt"; return 0; }
     
-    if [ "$confirm" = "yes" ]; then
-        print_info "Đang xóa rootfs..."
-        rm -rf "$ROOTFS_DIR"
-        print_info "Đã xóa rootfs!"
-    else
-        print_info "Hủy thao tác xóa"
-    fi
+    print_warn "CẢNH BÁO: Xóa toàn bộ rootfs tại $ROOTFS_DIR"
+    [ -f "$ROOTFS_DIR/.distro_name" ] && cat "$ROOTFS_DIR/.distro_name"
+    
+    read -p "Xác nhận xóa? (yes/no): " confirm
+    [ "$confirm" != "yes" ] && { print_info "Hủy xóa"; return 0; }
+    
+    print_info "Đang xóa..."
+    rm -rf "$ROOTFS_DIR" && print_info "Xóa thành công!" || print_error "Xóa thất bại"
 }
 
 # =============================
@@ -350,39 +398,52 @@ show_help() {
     cat << EOF
 ${COLOR_BLUE}PRoot Fake Root Environment${COLOR_RESET}
 
-Sử dụng:
+${COLOR_GREEN}Sử dụng:${COLOR_RESET}
   $0 [option]
 
-Options:
+${COLOR_GREEN}Options:${COLOR_RESET}
   -h, --help          Hiển thị trợ giúp
   -i, --install       Cài đặt rootfs mới
   -s, --start         Khởi động fake root (mặc định)
   -u, --uninstall     Xóa rootfs
   -r, --reinstall     Cài đặt lại rootfs
 
-Tính năng:
+${COLOR_GREEN}Tính năng:${COLOR_RESET}
   ✅ Giả lập môi trường root hoàn chỉnh
-  ✅ Có thể sử dụng apt/dpkg
-  ✅ Cài đặt packages như bình thường
-  ✅ Hỗ trợ nhiều distro (Ubuntu, Debian, Alpine, Arch)
+  ✅ Hỗ trợ 7 distro: Ubuntu (24.04, 22.04, 20.04), Debian (12, 11), Alpine, Arch
+  ✅ Sử dụng apt/apk/pacman bình thường
   ✅ Không cần quyền root thật
+  ✅ Tự động retry và fallback khi download
 
-Ví dụ:
-  $0                  # Khởi động fake root
-  $0 --install        # Cài đặt rootfs mới
-  $0 --uninstall      # Xóa rootfs
+${COLOR_GREEN}Ví dụ:${COLOR_RESET}
+  $0                  # Khởi động (auto-install nếu chưa cài)
+  $0 -i               # Cài đặt rootfs mới
+  $0 -r               # Cài lại từ đầu
+  FAKEROOT_DIR=/custom/path $0  # Dùng thư mục tùy chỉnh
 
-Sau khi vào fake root:
-  apt update          # Cập nhật packages
-  apt install vim     # Cài đặt vim
-  apt install python3 # Cài đặt python
+${COLOR_GREEN}Bên trong fake root:${COLOR_RESET}
+  apt update && apt install vim python3 nodejs
+  apk add curl wget git
+  pacman -Syu base-devel
 EOF
 }
 
 # =============================
 # MAIN
 # =============================
+validate_environment() {
+    # Kiểm tra các lệnh cần thiết
+    local required_cmds=("wget" "tar")
+    for cmd in "${required_cmds[@]}"; do
+        command -v "$cmd" &>/dev/null || {
+            print_error "Thiếu lệnh: $cmd. Vui lòng cài đặt."
+            exit 1
+        }
+    done
+}
+
 main() {
+    validate_environment
     case "${1:-}" in
         -h|--help)
             show_help
@@ -394,40 +455,36 @@ main() {
             ;;
         -r|--reinstall)
             uninstall_rootfs
-            print_banner
-            check_architecture
-            download_proot
-            choose_distro
-            install_rootfs
-            start_fake_root
-            ;;
+            ;& # Fallthrough
         -i|--install)
             print_banner
             check_architecture
-            download_proot
+            download_proot || exit 1
             choose_distro
-            install_rootfs
-            print_info "Cài đặt hoàn tất! Chạy '$0' để khởi động"
-            exit 0
+            install_rootfs || exit 1
+            
+            [ "${1:-}" = "-i" ] && {
+                print_info "Cài đặt hoàn tất! Chạy '$0' để khởi động"
+                exit 0
+            }
+            start_fake_root
             ;;
         -s|--start|"")
-            # Kiểm tra đã cài đặt chưa
+            # Auto-install nếu chưa cài
             if [ ! -f "$ROOTFS_DIR/.installed" ]; then
-                print_warn "Chưa cài đặt rootfs"
-                print_info "Đang bắt đầu cài đặt..."
+                print_warn "Chưa cài đặt rootfs, bắt đầu cài đặt..."
                 print_banner
                 check_architecture
-                download_proot
+                download_proot || exit 1
                 choose_distro
-                install_rootfs
+                install_rootfs || exit 1
             fi
             
             # Kiểm tra proot
-            if [ ! -x "$PROOT_BIN" ]; then
-                print_warn "proot chưa được cài đặt"
+            [ ! -x "$PROOT_BIN" ] && {
                 check_architecture
-                download_proot
-            fi
+                download_proot || exit 1
+            }
             
             start_fake_root
             ;;
@@ -439,4 +496,5 @@ main() {
     esac
 }
 
+# Chạy main
 main "$@"
