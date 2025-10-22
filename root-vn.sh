@@ -279,25 +279,44 @@ choose_distro() {
             ;;
         4)
             DISTRO_NAME="Debian 12"
-            # Debian sử dụng amd64, arm64, armhf, i386
-            ROOTFS_URL="https://github.com/termux/proot-distro/releases/download/v4.13.0/debian-${ARCH_ALT}-pd-v4.13.0.tar.xz"
+            # Sử dụng LXC images cho Debian
+            case "$ARCH_ALT" in
+                amd64) ROOTFS_URL="https://images.linuxcontainers.org/images/debian/bookworm/amd64/default/rootfs.tar.xz" ;;
+                arm64) ROOTFS_URL="https://images.linuxcontainers.org/images/debian/bookworm/arm64/default/rootfs.tar.xz" ;;
+                armhf) ROOTFS_URL="https://images.linuxcontainers.org/images/debian/bookworm/armhf/default/rootfs.tar.xz" ;;
+                i386) ROOTFS_URL="https://images.linuxcontainers.org/images/debian/bookworm/i386/default/rootfs.tar.xz" ;;
+                *) print_error "Kiến trúc không được hỗ trợ cho Debian: $ARCH_ALT"; return 1 ;;
+            esac
             ;;
         5)
             DISTRO_NAME="Debian 11"
-            ROOTFS_URL="https://github.com/termux/proot-distro/releases/download/v4.13.0/debian-${ARCH_ALT}-pd-v4.13.0.tar.xz"
+            # Sử dụng LXC images cho Debian 11
+            case "$ARCH_ALT" in
+                amd64) ROOTFS_URL="https://images.linuxcontainers.org/images/debian/bullseye/amd64/default/rootfs.tar.xz" ;;
+                arm64) ROOTFS_URL="https://images.linuxcontainers.org/images/debian/bullseye/arm64/default/rootfs.tar.xz" ;;
+                armhf) ROOTFS_URL="https://images.linuxcontainers.org/images/debian/bullseye/armhf/default/rootfs.tar.xz" ;;
+                i386) ROOTFS_URL="https://images.linuxcontainers.org/images/debian/bullseye/i386/default/rootfs.tar.xz" ;;
+                *) print_error "Kiến trúc không được hỗ trợ cho Debian: $ARCH_ALT"; return 1 ;;
+            esac
             ;;
         6)
             DISTRO_NAME="Alpine Linux"
             # Validate ALPINE_ARCH
             [ -z "$ALPINE_ARCH" ] && {
-                print_error "ALPINE_ARCH không được khởi tạo"
+                print_error "ALPINE_ARCH chưa được khởi tạo"
                 return 1
             }
-            ROOTFS_URL="https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/${ALPINE_ARCH}/alpine-minirootfs-3.19.1-${ALPINE_ARCH}.tar.gz"
+            # Cập nhật lên phiên bản Alpine mới nhất
+            ROOTFS_URL="https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/${ALPINE_ARCH}/alpine-minirootfs-3.20.3-${ALPINE_ARCH}.tar.gz"
             ;;
         7)
             DISTRO_NAME="Arch Linux"
-            ROOTFS_URL="https://github.com/termux/proot-distro/releases/download/v4.13.0/archlinux-${ARCH_ALT}-pd-v4.13.0.tar.xz"
+            # Sử dụng LXC images cho Arch Linux
+            case "$ARCH_ALT" in
+                amd64) ROOTFS_URL="https://images.linuxcontainers.org/images/archlinux/current/amd64/default/rootfs.tar.xz" ;;
+                arm64) ROOTFS_URL="https://images.linuxcontainers.org/images/archlinux/current/arm64/default/rootfs.tar.xz" ;;
+                *) print_error "Kiến trúc không được hỗ trợ cho Arch Linux: $ARCH_ALT"; return 1 ;;
+            esac
             ;;
         *)
             print_error "Lựa chọn không hợp lệ"
@@ -346,8 +365,8 @@ install_rootfs() {
         # URL dự phòng
         case "$DISTRO_NAME" in
             "Alpine Linux")
-                print_info "Thử Alpine 3.18.4..."
-                ROOTFS_URL="https://dl-cdn.alpinelinux.org/alpine/v3.18/releases/${ALPINE_ARCH}/alpine-minirootfs-3.18.4-${ALPINE_ARCH}.tar.gz"
+                print_info "Đang thử Alpine 3.19.1..."
+                ROOTFS_URL="https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/${ALPINE_ARCH}/alpine-minirootfs-3.19.1-${ALPINE_ARCH}.tar.gz"
                 ROOTFS_FILE="/tmp/rootfs_$$.tar.gz"
                 download_file "$ROOTFS_URL" "$ROOTFS_FILE" || return 1
                 ;;
