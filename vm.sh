@@ -70,7 +70,7 @@ print_banner() {
 ║                                                      ║
 ║           UBUNTU 22.04 VM WITH QEMU                  ║
 ║                                                      ║
-║           RAM: 8GB | Storage: 40GB | CPU: 2          ║
+║           RAM: 8GB | Storage: 20GB | CPU: 2          ║
 ║      Modified from: quanvm0501, BiraloGaming         ║
 ║                                                      ║
 ╚══════════════════════════════════════════════════════╝
