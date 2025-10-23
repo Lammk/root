@@ -10,15 +10,16 @@ set -uo pipefail
 # CẤU HÌNH
 # =============================
 VM_NAME="ubuntu-22.04"
-VM_DIR="$HOME/VMs/$VM_NAME"
+VM_BASE_DIR=""  # Will be set by select_disk_location
+VM_DIR=""       # Will be set after disk selection
 IMG_URL="https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
-IMG_FILE="$VM_DIR/ubuntu-base.img"
-SEED_FILE="$VM_DIR/seed.iso"
+IMG_FILE=""     # Will be set after disk selection
+SEED_FILE=""    # Will be set after disk selection
 
 # VM Specs
 RAM="8G"
 CPU_CORES="2"
-DISK_SIZE="40G"
+DISK_SIZE="20G"
 SSH_PORT="2222"
 
 # I/O and stability settings
@@ -205,6 +206,135 @@ show_host_specs() {
         print_info "Setup cancelled by user"
         exit 0
     fi
+}
+
+select_disk_location() {
+    echo ""
+    echo -e "${CYAN}╔════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${CYAN}║          SELECT DISK FOR VM INSTALLATION           ║${RESET}"
+    echo -e "${CYAN}╚════════════════════════════════════════════════════╝${RESET}"
+    echo ""
+    
+    # Get list of mounted filesystems with available space
+    local -a disks
+    local -a mount_points
+    local -a available_space
+    local -a sizes
+    local index=1
+    local max_space=0
+    local max_space_index=0
+    
+    # Parse df output
+    while IFS= read -r line; do
+        local device=$(echo "$line" | awk '{print $1}')
+        local size=$(echo "$line" | awk '{print $2}')
+        local avail=$(echo "$line" | awk '{print $4}')
+        local mount=$(echo "$line" | awk '{print $6}')
+        
+        # Convert to GB for comparison
+        local avail_gb=$(echo "$avail" | sed 's/G//' | sed 's/M/0./' | sed 's/K/0.00/' | cut -d. -f1)
+        
+        disks+=("$device")
+        mount_points+=("$mount")
+        available_space+=("$avail")
+        sizes+=("$size")
+        
+        # Track disk with most space
+        if [ "$avail_gb" -gt "$max_space" ]; then
+            max_space=$avail_gb
+            max_space_index=$index
+        fi
+        
+        index=$((index + 1))
+    done < <(df -h | grep -E '^/dev/' | grep -v '/boot' | grep -v '/snap')
+    
+    # Display options
+    echo -e "${GREEN}Available disks:${RESET}"
+    echo ""
+    
+    for i in "${!disks[@]}"; do
+        local num=$((i + 1))
+        local is_default=""
+        if [ "$num" -eq "$max_space_index" ]; then
+            is_default=" ${YELLOW}[DEFAULT - Most space]${RESET}"
+        fi
+        
+        echo -e "  ${CYAN}[$num]${RESET} ${disks[$i]}"
+        echo "      Mount:     ${mount_points[$i]}"
+        echo "      Size:      ${sizes[$i]}"
+        echo "      Available: ${available_space[$i]}$is_default"
+        echo ""
+    done
+    
+    echo -e "  ${CYAN}[0]${RESET} Exit"
+    echo ""
+    
+    # Ask user to select
+    while true; do
+        echo -e "${YELLOW}Select disk number [0-${#disks[@]}]:${RESET}"
+        echo -e "${YELLOW}(Press ENTER for default: disk #$max_space_index with most space)${RESET}"
+        read -p "> " choice
+        
+        # Handle empty input (default)
+        if [ -z "$choice" ]; then
+            choice=$max_space_index
+            print_info "Using default disk #$choice (most available space)"
+            break
+        fi
+        
+        # Handle exit
+        if [ "$choice" = "0" ]; then
+            print_info "Setup cancelled by user"
+            exit 0
+        fi
+        
+        # Validate input
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#disks[@]}" ]; then
+            break
+        else
+            print_error "Invalid choice. Please enter a number between 0 and ${#disks[@]}"
+        fi
+    done
+    
+    # Set selected disk
+    local selected_index=$((choice - 1))
+    local selected_mount="${mount_points[$selected_index]}"
+    local selected_device="${disks[$selected_index]}"
+    local selected_avail="${available_space[$selected_index]}"
+    
+    echo ""
+    print_info "Selected disk: $selected_device"
+    print_info "Mount point: $selected_mount"
+    print_info "Available space: $selected_avail"
+    
+    # Set VM directories based on selection
+    VM_BASE_DIR="$selected_mount/VMs"
+    VM_DIR="$VM_BASE_DIR/$VM_NAME"
+    IMG_FILE="$VM_DIR/ubuntu-base.img"
+    SEED_FILE="$VM_DIR/seed.iso"
+    MONITOR_LOG="$VM_DIR/monitor.log"
+    
+    # Check if enough space
+    local avail_gb=$(echo "$selected_avail" | sed 's/G//' | sed 's/M/0./' | cut -d. -f1)
+    local needed_gb=$(echo "$DISK_SIZE" | sed 's/G//')
+    
+    if [ "$avail_gb" -lt "$needed_gb" ]; then
+        echo ""
+        print_warn "Warning: Selected disk may not have enough space!"
+        print_warn "  Available: ${selected_avail}"
+        print_warn "  VM needs: ${DISK_SIZE}"
+        echo ""
+        read -p "Continue anyway? (y/N): " -n 1 -r
+        echo ""
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            print_info "Setup cancelled"
+            exit 0
+        fi
+    fi
+    
+    echo ""
+    print_info "VM will be installed to: $VM_DIR"
+    echo ""
 }
 
 check_resources() {
@@ -799,6 +929,7 @@ Terminal Controls:
   Monitor:  Ctrl+A, then C
 
 Features:
+  ✓ Choose disk location for VM installation
   ✓ Host system specs check before start
   ✓ Auto-login to terminal after boot
   ✓ Cloud-init auto-configuration
@@ -807,9 +938,14 @@ Features:
   ✓ Automatic freeze detection & recovery
   ✓ No manual installation needed
 
+Disk Selection:
+  - Press ENTER: Auto-select disk with most space
+  - Enter number: Choose specific disk
+  - Enter 0: Exit setup
+
 Files:
-  VM Dir:   $VM_DIR
-  Image:    $IMG_FILE (40GB)
+  VM Dir:   Selected during setup
+  Image:    40GB (grows as needed)
 EOF
 }
 
@@ -822,24 +958,51 @@ check_kvm
 
 case "${1:-}" in
     -s|--start)
+        select_disk_location
         show_host_specs
         start_vm_gui
         ;;
     -m|--monitor)
+        select_disk_location
         show_host_specs
         setup_vm
         start_vm_with_monitor
         ;;
     -k|--stop)
+        # For stop, we need to find existing VM
+        # Check common locations
+        if [ -d "$HOME/VMs/$VM_NAME" ]; then
+            VM_DIR="$HOME/VMs/$VM_NAME"
+        else
+            # Search in all mounted disks
+            for mount in $(df -h | grep -E '^/dev/' | awk '{print $6}'); do
+                if [ -d "$mount/VMs/$VM_NAME" ]; then
+                    VM_DIR="$mount/VMs/$VM_NAME"
+                    break
+                fi
+            done
+        fi
         stop_vm
         ;;
     -i|--info)
+        # For info, find existing VM
+        if [ -d "$HOME/VMs/$VM_NAME" ]; then
+            VM_DIR="$HOME/VMs/$VM_NAME"
+        else
+            for mount in $(df -h | grep -E '^/dev/' | awk '{print $6}'); do
+                if [ -d "$mount/VMs/$VM_NAME" ]; then
+                    VM_DIR="$mount/VMs/$VM_NAME"
+                    break
+                fi
+            done
+        fi
         vm_info
         ;;
     --help)
         show_help
         ;;
     "")
+        select_disk_location
         show_host_specs
         setup_vm
         start_vm
