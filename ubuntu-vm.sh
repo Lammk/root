@@ -96,6 +96,9 @@ check_tools() {
 check_resources() {
     print_info "Checking system resources..."
     
+    # Create VM dir if not exists
+    mkdir -p "$VM_DIR" 2>/dev/null || true
+    
     # Check available RAM
     local total_ram=$(free -g | awk '/^Mem:/{print $2}')
     local vm_ram=$(echo "$RAM" | sed 's/G//')
@@ -123,8 +126,9 @@ check_resources() {
         exit 1
     fi
     
-    # Validate image files
+    # Validate image files (only if exists)
     if [ -f "$IMG_FILE" ]; then
+        print_info "Validating disk image..."
         if ! qemu-img check "$IMG_FILE" &>/dev/null; then
             print_warn "Image file may be corrupted: $IMG_FILE"
             print_warn "Consider recreating the VM"
@@ -137,8 +141,9 @@ check_resources() {
 check_kvm() {
     if [ -r /dev/kvm ]; then
         print_info "KVM acceleration available ✓"
-        # CPU host passthrough with all features for maximum performance
-        KVM_FLAG="-enable-kvm -cpu host,+x2apic,+tsc-deadline,+hypervisor,+invtsc,+pdpe1gb,+rdrand,+rdseed,+avx,+avx2,+bmi1,+bmi2,+fma,+movbe,+xsave,+xsaveopt,+aes"
+        # CPU host passthrough with safe features (compatible with most CPUs)
+        # Removed potentially unsupported features to prevent crashes
+        KVM_FLAG="-enable-kvm -cpu host"
     else
         print_warn "KVM not available, using TCG (slower)"
         print_warn "To enable KVM: sudo modprobe kvm-intel (or kvm-amd)"
@@ -292,8 +297,6 @@ start_vm() {
         -device virtio-net-pci,netdev=n0,mq=on,vectors=4 \
         -netdev user,id=n0,hostfwd=tcp::"$SSH_PORT"-:22 \
         -device virtio-balloon-pci,id=balloon0,deflate-on-oom=on \
-        -watchdog i6300esb \
-        -watchdog-action reset \
         -nographic \
         -serial mon:stdio \
         -no-reboot \
@@ -333,8 +336,6 @@ start_vm_gui() {
         -device virtio-net-pci,netdev=n0,mq=on,vectors=4 \
         -netdev user,id=n0,hostfwd=tcp::"$SSH_PORT"-:22 \
         -device virtio-balloon-pci,id=balloon0,deflate-on-oom=on \
-        -watchdog i6300esb \
-        -watchdog-action reset \
         -vga virtio \
         -display gtk \
         -no-reboot \
