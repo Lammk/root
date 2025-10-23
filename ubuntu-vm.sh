@@ -3,7 +3,8 @@
 # Modified from: quanvm0501 (BlackCatOfficial), BiraloGaming
 # RAM: 8GB, Storage: 40GB, CPU: 2 cores
 
-set -euo pipefail
+# Don't use set -e to prevent QEMU from killing itself on minor errors
+set -uo pipefail
 
 # =============================
 # CẤU HÌNH
@@ -92,10 +93,52 @@ check_tools() {
     print_info "All required tools found ✓"
 }
 
+check_resources() {
+    print_info "Checking system resources..."
+    
+    # Check available RAM
+    local total_ram=$(free -g | awk '/^Mem:/{print $2}')
+    local vm_ram=$(echo "$RAM" | sed 's/G//')
+    
+    if [ "$total_ram" -lt "$((vm_ram + 2))" ]; then
+        print_warn "Low RAM: Host has ${total_ram}G, VM needs ${vm_ram}G"
+        print_warn "Recommended: At least $((vm_ram + 2))G total RAM"
+        read -p "Continue anyway? (y/N): " -n 1 -r
+        echo
+        [[ ! $REPLY =~ ^[Yy]$ ]] && exit 1
+    fi
+    
+    # Check disk space
+    local free_space=$(df -BG "$VM_DIR" 2>/dev/null | awk 'NR==2{print $4}' | sed 's/G//' || echo "100")
+    if [ "$free_space" -lt 50 ]; then
+        print_warn "Low disk space: ${free_space}G available"
+        print_warn "Recommended: At least 50G free space"
+    fi
+    
+    # Check if another VM is running
+    if pgrep -f "qemu-system-x86_64.*$VM_NAME" &>/dev/null; then
+        print_error "VM is already running!"
+        print_error "PID: $(pgrep -f "qemu-system-x86_64.*$VM_NAME")"
+        print_error "Stop it first: ./ubuntu-vm.sh -k"
+        exit 1
+    fi
+    
+    # Validate image files
+    if [ -f "$IMG_FILE" ]; then
+        if ! qemu-img check "$IMG_FILE" &>/dev/null; then
+            print_warn "Image file may be corrupted: $IMG_FILE"
+            print_warn "Consider recreating the VM"
+        fi
+    fi
+    
+    print_info "Resource check passed ✓"
+}
+
 check_kvm() {
     if [ -r /dev/kvm ]; then
         print_info "KVM acceleration available ✓"
-        KVM_FLAG="-enable-kvm -cpu host"
+        # CPU host passthrough with all features for maximum performance
+        KVM_FLAG="-enable-kvm -cpu host,+x2apic,+tsc-deadline,+hypervisor,+invtsc,+pdpe1gb,+rdrand,+rdseed,+avx,+avx2,+bmi1,+bmi2,+fma,+movbe,+xsave,+xsaveopt,+aes"
     else
         print_warn "KVM not available, using TCG (slower)"
         print_warn "To enable KVM: sudo modprobe kvm-intel (or kvm-amd)"
@@ -143,8 +186,9 @@ runcmd:
   - systemctl start ssh
   # Swap file creation
   - |
-    if [ "$SWAP_SIZE" != "0G" ]; then
-      fallocate -l $SWAP_SIZE /swapfile
+    SWAP_SIZE="$SWAP_SIZE"
+    if [ "\$SWAP_SIZE" != "0G" ] && [ -n "\$SWAP_SIZE" ]; then
+      fallocate -l \$SWAP_SIZE /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
       chmod 600 /swapfile
       mkswap /swapfile
       swapon /swapfile
@@ -160,6 +204,8 @@ runcmd:
     AUTOLOGIN
   - systemctl daemon-reload
   - systemctl restart serial-getty@ttyS0.service
+  # Disable cloud-init after first boot for faster subsequent boots
+  - touch /etc/cloud/cloud-init.disabled
 growpart:
   mode: auto
   devices: ["/"]
@@ -190,8 +236,14 @@ EOF
 }
 
 cleanup() {
+    echo ""
     print_info "Shutting down VM gracefully..."
-    pkill -f "qemu-system-x86_64.*$VM_NAME" || true
+    # Send SIGTERM first for graceful shutdown
+    pkill -TERM -f "qemu-system-x86_64.*$VM_NAME" 2>/dev/null || true
+    sleep 2
+    # Force kill if still running
+    pkill -KILL -f "qemu-system-x86_64.*$VM_NAME" 2>/dev/null || true
+    print_info "VM stopped"
 }
 
 start_vm() {
@@ -200,7 +252,10 @@ start_vm() {
         exit 1
     fi
     
-    trap cleanup SIGINT SIGTERM
+    # Pre-flight checks
+    check_resources
+    
+    trap cleanup SIGINT SIGTERM EXIT
     
     print_banner
     echo -e "${CYAN}CREDIT: quanvm0501 (BlackCatOfficial), BiraloGaming${RESET}"
@@ -222,19 +277,34 @@ start_vm() {
     echo ""
     
     cd "$VM_DIR"
+    
+    # Create log file for debugging
+    local LOG_FILE="$VM_DIR/qemu.log"
+    
     exec qemu-system-x86_64 \
         $KVM_FLAG \
         -m "$RAM" \
-        -smp "$CPU_CORES" \
-        -drive file="$IMG_FILE",format=qcow2,if=virtio,cache=writeback \
-        -drive file="$PERSISTENT_DISK",format=qcow2,if=virtio,cache=writeback \
-        -drive file="$SEED_FILE",format=raw,if=virtio \
-        -boot order=c \
-        -device virtio-net-pci,netdev=n0 \
+        -smp "$CPU_CORES",cores="$CPU_CORES",threads=1,sockets=1 \
+        -drive file="$IMG_FILE",format=qcow2,if=virtio,cache=unsafe,aio=native,discard=unmap \
+        -drive file="$PERSISTENT_DISK",format=qcow2,if=virtio,cache=unsafe,aio=native,discard=unmap \
+        -drive file="$SEED_FILE",format=raw,if=virtio,cache=unsafe \
+        -boot order=c,menu=off,strict=on \
+        -device virtio-net-pci,netdev=n0,mq=on,vectors=4 \
         -netdev user,id=n0,hostfwd=tcp::"$SSH_PORT"-:22 \
+        -device virtio-balloon-pci,id=balloon0,deflate-on-oom=on \
+        -watchdog i6300esb \
+        -watchdog-action reset \
         -nographic \
         -serial mon:stdio \
-        -name "$VM_NAME"
+        -no-reboot \
+        -no-shutdown \
+        -rtc base=localtime,clock=host,driftfix=slew \
+        -global kvm-pit.lost_tick_policy=discard \
+        -no-hpet \
+        -overcommit mem-lock=off \
+        -msg timestamp=on \
+        -D "$LOG_FILE" \
+        -name "$VM_NAME",process="$VM_NAME"
 }
 
 start_vm_gui() {
@@ -248,19 +318,34 @@ start_vm_gui() {
     print_info "Starting Ubuntu 22.04 VM (GUI mode)..."
     
     cd "$VM_DIR"
+    
+    # Create log file for debugging
+    local LOG_FILE="$VM_DIR/qemu.log"
+    
     exec qemu-system-x86_64 \
         $KVM_FLAG \
         -m "$RAM" \
-        -smp "$CPU_CORES" \
-        -drive file="$IMG_FILE",format=qcow2,if=virtio,cache=writeback \
-        -drive file="$PERSISTENT_DISK",format=qcow2,if=virtio,cache=writeback \
-        -drive file="$SEED_FILE",format=raw,if=virtio \
-        -boot order=c \
-        -device virtio-net-pci,netdev=n0 \
+        -smp "$CPU_CORES",cores="$CPU_CORES",threads=1,sockets=1 \
+        -drive file="$IMG_FILE",format=qcow2,if=virtio,cache=unsafe,aio=native,discard=unmap \
+        -drive file="$PERSISTENT_DISK",format=qcow2,if=virtio,cache=unsafe,aio=native,discard=unmap \
+        -drive file="$SEED_FILE",format=raw,if=virtio,cache=unsafe \
+        -boot order=c,menu=off,strict=on \
+        -device virtio-net-pci,netdev=n0,mq=on,vectors=4 \
         -netdev user,id=n0,hostfwd=tcp::"$SSH_PORT"-:22 \
+        -device virtio-balloon-pci,id=balloon0,deflate-on-oom=on \
+        -watchdog i6300esb \
+        -watchdog-action reset \
         -vga virtio \
         -display gtk \
-        -name "$VM_NAME"
+        -no-reboot \
+        -no-shutdown \
+        -rtc base=localtime,clock=host,driftfix=slew \
+        -global kvm-pit.lost_tick_policy=discard \
+        -no-hpet \
+        -overcommit mem-lock=off \
+        -msg timestamp=on \
+        -D "$LOG_FILE" \
+        -name "$VM_NAME",process="$VM_NAME"
 }
 
 vm_info() {
