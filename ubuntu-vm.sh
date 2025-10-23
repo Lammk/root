@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Ubuntu 22.04 VM with QEMU
+# Ubuntu 22.04 VM with QEMU - Auto Login Terminal
+# Modified from: quanvm0501 (BlackCatOfficial), BiraloGaming
 # RAM: 8GB, Storage: 40GB, CPU: 2 cores
 
 set -euo pipefail
@@ -9,12 +10,25 @@ set -euo pipefail
 # =============================
 VM_NAME="ubuntu-22.04"
 VM_DIR="$HOME/VMs/$VM_NAME"
-DISK_IMAGE="$VM_DIR/ubuntu.qcow2"
-DISK_SIZE="40G"
+IMG_URL="https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
+IMG_FILE="$VM_DIR/ubuntu-base.img"
+PERSISTENT_DISK="$VM_DIR/persistent.qcow2"
+SEED_FILE="$VM_DIR/seed.iso"
+
+# VM Specs
 RAM="8G"
 CPU_CORES="2"
-ISO_URL="https://releases.ubuntu.com/22.04/ubuntu-22.04.5-live-server-amd64.iso"
-ISO_FILE="$VM_DIR/ubuntu-22.04.5-live-server-amd64.iso"
+DISK_SIZE="40G"
+PERSISTENT_SIZE="20G"
+SSH_PORT="2222"
+
+# Credentials
+HOSTNAME="ubuntu-vm"
+USERNAME="ubuntu"
+PASSWORD="ubuntu"
+
+# Swap (set to 0G if using KVM)
+SWAP_SIZE="2G"
 
 # Colors
 RED='\033[0;31m'
@@ -48,196 +62,277 @@ print_banner() {
 ║           UBUNTU 22.04 VM WITH QEMU                  ║
 ║                                                      ║
 ║           RAM: 8GB | Storage: 40GB | CPU: 2          ║
+║      Modified from: quanvm0501, BiraloGaming         ║
 ║                                                      ║
 ╚══════════════════════════════════════════════════════╝
 EOF
     echo -e "${RESET}"
 }
 
-check_qemu() {
-    if ! command -v qemu-system-x86_64 &>/dev/null; then
-        print_error "QEMU chưa được cài đặt!"
+check_tools() {
+    print_info "Checking required tools..."
+    local missing=0
+    
+    for cmd in qemu-system-x86_64 qemu-img cloud-localds wget; do
+        if ! command -v $cmd &>/dev/null; then
+            print_error "Required command '$cmd' not found"
+            missing=1
+        fi
+    done
+    
+    if [ $missing -eq 1 ]; then
         echo ""
-        echo "Cài đặt QEMU:"
-        echo "  Ubuntu/Debian: sudo apt install qemu-system-x86 qemu-utils"
-        echo "  Fedora:        sudo dnf install qemu-system-x86"
-        echo "  Arch:          sudo pacman -S qemu-full"
+        echo "Install required packages:"
+        echo "  Ubuntu/Debian: sudo apt install qemu-system-x86 qemu-utils cloud-image-utils wget"
+        echo "  Fedora:        sudo dnf install qemu-system-x86 cloud-utils wget"
+        echo "  Arch:          sudo pacman -S qemu-full cloud-init wget"
         exit 1
     fi
-    print_info "QEMU đã được cài đặt: $(qemu-system-x86_64 --version | head -1)"
+    
+    print_info "All required tools found ✓"
 }
 
 check_kvm() {
     if [ -r /dev/kvm ]; then
         print_info "KVM acceleration available ✓"
-        KVM_ENABLED="-enable-kvm"
+        KVM_FLAG="-enable-kvm -cpu host"
     else
-        print_warn "KVM không khả dụng, VM sẽ chạy chậm hơn"
-        print_warn "Để enable KVM: sudo modprobe kvm-intel (hoặc kvm-amd)"
-        KVM_ENABLED=""
+        print_warn "KVM not available, using TCG (slower)"
+        print_warn "To enable KVM: sudo modprobe kvm-intel (or kvm-amd)"
+        KVM_FLAG="-accel tcg"
     fi
 }
 
 setup_vm() {
-    print_info "Đang thiết lập VM..."
-    
-    # Tạo thư mục
+    print_info "Setting up VM..."
     mkdir -p "$VM_DIR"
+    cd "$VM_DIR"
     
-    # Tạo disk image nếu chưa có
-    if [ ! -f "$DISK_IMAGE" ]; then
-        print_info "Tạo disk image $DISK_SIZE..."
-        qemu-img create -f qcow2 "$DISK_IMAGE" "$DISK_SIZE"
+    # Download cloud image if not exists
+    if [ ! -f "$IMG_FILE" ]; then
+        print_info "Downloading Ubuntu 22.04 Cloud Image..."
+        wget "$IMG_URL" -O "$IMG_FILE" --show-progress
+        
+        print_info "Resizing image to $DISK_SIZE..."
+        qemu-img resize "$IMG_FILE" "$DISK_SIZE"
+        
+        print_info "Creating cloud-init configuration..."
+        
+        # Create user-data for cloud-init
+        cat > user-data <<EOF
+#cloud-config
+hostname: $HOSTNAME
+manage_etc_hosts: true
+disable_root: false
+ssh_pwauth: true
+chpasswd:
+  list: |
+    $USERNAME:$PASSWORD
+  expire: false
+users:
+  - name: $USERNAME
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: false
+packages:
+  - openssh-server
+runcmd:
+  - echo "$USERNAME:$PASSWORD" | chpasswd
+  - mkdir -p /var/run/sshd
+  - systemctl enable ssh
+  - systemctl start ssh
+  # Swap file creation
+  - |
+    if [ "$SWAP_SIZE" != "0G" ]; then
+      fallocate -l $SWAP_SIZE /swapfile
+      chmod 600 /swapfile
+      mkswap /swapfile
+      swapon /swapfile
+      echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab
+    fi
+  # Auto-login on serial console
+  - mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d
+  - |
+    cat > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf <<AUTOLOGIN
+    [Service]
+    ExecStart=
+    ExecStart=-/sbin/agetty --autologin $USERNAME --noclear %I \$TERM
+    AUTOLOGIN
+  - systemctl daemon-reload
+  - systemctl restart serial-getty@ttyS0.service
+growpart:
+  mode: auto
+  devices: ["/"]
+  ignore_growroot_disabled: false
+resize_rootfs: true
+EOF
+
+        # Create meta-data
+        cat > meta-data <<EOF
+instance-id: iid-local01
+local-hostname: $HOSTNAME
+EOF
+
+        # Generate seed ISO
+        print_info "Generating cloud-init seed ISO..."
+        cloud-localds "$SEED_FILE" user-data meta-data
+        
+        print_info "VM image setup complete!"
     else
-        print_info "Disk image đã tồn tại: $DISK_IMAGE"
+        print_info "VM image already exists, skipping download"
     fi
     
-    # Download ISO nếu chưa có
-    if [ ! -f "$ISO_FILE" ]; then
-        print_info "Đang tải Ubuntu 22.04 ISO..."
-        if command -v wget &>/dev/null; then
-            wget -O "$ISO_FILE" "$ISO_URL" --show-progress
-        elif command -v curl &>/dev/null; then
-            curl -L -o "$ISO_FILE" "$ISO_URL" --progress-bar
-        else
-            print_error "Cần wget hoặc curl để tải ISO"
-            exit 1
-        fi
-    else
-        print_info "ISO đã tồn tại: $ISO_FILE"
+    # Create persistent disk if not exists
+    if [ ! -f "$PERSISTENT_DISK" ]; then
+        print_info "Creating persistent disk ($PERSISTENT_SIZE)..."
+        qemu-img create -f qcow2 "$PERSISTENT_DISK" "$PERSISTENT_SIZE"
     fi
 }
 
-start_vm_install() {
-    print_info "Khởi động VM để cài đặt Ubuntu..."
-    echo ""
-    print_warn "Sau khi cài đặt xong, tắt VM và chạy lại script với option -s để start"
-    echo ""
-    sleep 3
-    
-    qemu-system-x86_64 \
-        $KVM_ENABLED \
-        -m "$RAM" \
-        -smp "$CPU_CORES" \
-        -hda "$DISK_IMAGE" \
-        -cdrom "$ISO_FILE" \
-        -boot d \
-        -net nic,model=virtio \
-        -net user,hostfwd=tcp::2222-:22 \
-        -vga virtio \
-        -display gtk \
-        -name "$VM_NAME"
+cleanup() {
+    print_info "Shutting down VM gracefully..."
+    pkill -f "qemu-system-x86_64.*$VM_NAME" || true
 }
 
 start_vm() {
-    if [ ! -f "$DISK_IMAGE" ]; then
-        print_error "Disk image không tồn tại. Chạy script không có option để cài đặt."
+    if [ ! -f "$IMG_FILE" ]; then
+        print_error "VM image not found. Run setup first."
         exit 1
     fi
     
-    print_info "Khởi động VM Ubuntu 22.04..."
+    trap cleanup SIGINT SIGTERM
+    
+    print_banner
+    echo -e "${CYAN}CREDIT: quanvm0501 (BlackCatOfficial), BiraloGaming${RESET}"
     echo ""
-    print_info "SSH forwarding: localhost:2222 -> VM:22"
-    print_info "Để SSH: ssh -p 2222 user@localhost"
+    print_info "Starting Ubuntu 22.04 VM..."
+    echo ""
+    echo -e "${GREEN}Credentials:${RESET}"
+    echo "  Username: $USERNAME"
+    echo "  Password: $PASSWORD"
+    echo "  SSH:      ssh -p $SSH_PORT $USERNAME@localhost"
+    echo ""
+    echo -e "${YELLOW}Terminal Controls:${RESET}"
+    echo "  Exit QEMU: Ctrl+A, then X"
+    echo "  Monitor:   Ctrl+A, then C"
+    echo ""
+    echo -e "${CYAN}VM will auto-login after boot...${RESET}"
+    echo ""
+    read -n1 -r -p "Press any key to start VM..."
     echo ""
     
-    qemu-system-x86_64 \
-        $KVM_ENABLED \
+    cd "$VM_DIR"
+    exec qemu-system-x86_64 \
+        $KVM_FLAG \
         -m "$RAM" \
         -smp "$CPU_CORES" \
-        -hda "$DISK_IMAGE" \
-        -net nic,model=virtio \
-        -net user,hostfwd=tcp::2222-:22 \
-        -vga virtio \
-        -display gtk \
-        -name "$VM_NAME"
-}
-
-start_vm_headless() {
-    if [ ! -f "$DISK_IMAGE" ]; then
-        print_error "Disk image không tồn tại. Chạy script không có option để cài đặt."
-        exit 1
-    fi
-    
-    print_info "Khởi động VM Ubuntu 22.04 (terminal mode)..."
-    echo ""
-    print_info "VM sẽ chạy trực tiếp trong terminal này"
-    print_info "Để thoát: Ctrl+A, sau đó X"
-    print_info "SSH forwarding: localhost:2222 -> VM:22"
-    echo ""
-    sleep 2
-    
-    qemu-system-x86_64 \
-        $KVM_ENABLED \
-        -m "$RAM" \
-        -smp "$CPU_CORES" \
-        -hda "$DISK_IMAGE" \
-        -net nic,model=virtio \
-        -net user,hostfwd=tcp::2222-:22 \
+        -drive file="$IMG_FILE",format=qcow2,if=virtio,cache=writeback \
+        -drive file="$PERSISTENT_DISK",format=qcow2,if=virtio,cache=writeback \
+        -drive file="$SEED_FILE",format=raw,if=virtio \
+        -boot order=c \
+        -device virtio-net-pci,netdev=n0 \
+        -netdev user,id=n0,hostfwd=tcp::"$SSH_PORT"-:22 \
         -nographic \
         -serial mon:stdio \
         -name "$VM_NAME"
 }
 
-stop_vm() {
-    print_info "Đang tắt VM..."
-    pkill -f "$VM_NAME" || print_warn "VM không chạy"
+start_vm_gui() {
+    if [ ! -f "$IMG_FILE" ]; then
+        print_error "VM image not found. Run setup first."
+        exit 1
+    fi
+    
+    trap cleanup SIGINT SIGTERM
+    
+    print_info "Starting Ubuntu 22.04 VM (GUI mode)..."
+    
+    cd "$VM_DIR"
+    exec qemu-system-x86_64 \
+        $KVM_FLAG \
+        -m "$RAM" \
+        -smp "$CPU_CORES" \
+        -drive file="$IMG_FILE",format=qcow2,if=virtio,cache=writeback \
+        -drive file="$PERSISTENT_DISK",format=qcow2,if=virtio,cache=writeback \
+        -drive file="$SEED_FILE",format=raw,if=virtio \
+        -boot order=c \
+        -device virtio-net-pci,netdev=n0 \
+        -netdev user,id=n0,hostfwd=tcp::"$SSH_PORT"-:22 \
+        -vga virtio \
+        -display gtk \
+        -name "$VM_NAME"
 }
 
 vm_info() {
     echo -e "${CYAN}VM Information:${RESET}"
-    echo "  Name:     $VM_NAME"
-    echo "  RAM:      $RAM"
-    echo "  CPU:      $CPU_CORES cores"
-    echo "  Storage:  $DISK_SIZE"
-    echo "  Disk:     $DISK_IMAGE"
-    echo "  ISO:      $ISO_FILE"
+    echo "  Name:       $VM_NAME"
+    echo "  RAM:        $RAM"
+    echo "  CPU:        $CPU_CORES cores"
+    echo "  Storage:    $DISK_SIZE"
+    echo "  Username:   $USERNAME"
+    echo "  Password:   $PASSWORD"
+    echo "  SSH:        ssh -p $SSH_PORT $USERNAME@localhost"
     echo ""
     
-    if [ -f "$DISK_IMAGE" ]; then
+    if [ -f "$IMG_FILE" ]; then
         echo -e "${CYAN}Disk Info:${RESET}"
-        qemu-img info "$DISK_IMAGE"
+        qemu-img info "$IMG_FILE" | grep -E "virtual size|disk size|format"
     fi
     
     echo ""
-    if pgrep -f "$VM_NAME" &>/dev/null; then
+    if pgrep -f "qemu-system-x86_64.*$VM_NAME" &>/dev/null; then
         echo -e "${GREEN}Status: RUNNING${RESET}"
-        echo "PID: $(pgrep -f "$VM_NAME")"
+        echo "PID: $(pgrep -f "qemu-system-x86_64.*$VM_NAME")"
     else
         echo -e "${YELLOW}Status: STOPPED${RESET}"
     fi
 }
 
+stop_vm() {
+    print_info "Stopping VM..."
+    pkill -f "qemu-system-x86_64.*$VM_NAME" || print_warn "VM not running"
+}
+
 show_help() {
     cat << EOF
 ${CYAN}Ubuntu 22.04 VM Manager${RESET}
+Modified from: quanvm0501 (BlackCatOfficial), BiraloGaming
 
 Usage: $0 [OPTION]
 
 Options:
-  (no option)   Cài đặt VM mới (nếu chưa có) hoặc start VM trong terminal
-  -s, --start   Start VM với GUI
-  -h, --headless Start VM trong terminal (nographic mode)
-  -k, --stop    Tắt VM
-  -i, --info    Hiển thị thông tin VM
-  --help        Hiển thị help này
+  (no option)   Setup and start VM in terminal (auto-login)
+  -s, --start   Start VM with GUI
+  -k, --stop    Stop VM
+  -i, --info    Show VM information
+  --help        Show this help
 
 Examples:
-  $0              # Cài đặt hoặc start VM trong terminal (mặc định)
-  $0 -s           # Start VM với GUI
-  $0 -h           # Start VM trong terminal
-  $0 -k           # Tắt VM
-  $0 -i           # Xem thông tin VM
+  $0              # Setup and start VM (terminal, auto-login)
+  $0 -s           # Start VM with GUI
+  $0 -k           # Stop VM
+  $0 -i           # Show info
 
-Terminal Mode:
-  Thoát: Ctrl+A, sau đó X
-  SSH:   ssh -p 2222 user@localhost (từ terminal khác)
+Credentials:
+  Username: $USERNAME
+  Password: $PASSWORD
+  SSH:      ssh -p $SSH_PORT $USERNAME@localhost
 
-Notes:
-  - Cần cài QEMU trước: sudo apt install qemu-system-x86 qemu-utils
-  - Enable KVM để tăng tốc: sudo modprobe kvm-intel
-  - Disk image: $DISK_IMAGE
-  - ISO file: $ISO_FILE
+Terminal Controls:
+  Exit:     Ctrl+A, then X
+  Monitor:  Ctrl+A, then C
+
+Features:
+  ✓ Auto-login to terminal after boot
+  ✓ Cloud-init auto-configuration
+  ✓ SSH ready on port $SSH_PORT
+  ✓ KVM acceleration (if available)
+  ✓ No manual installation needed
+
+Files:
+  VM Dir:   $VM_DIR
+  Image:    $IMG_FILE
+  Disk:     $PERSISTENT_DISK
 EOF
 }
 
@@ -245,15 +340,12 @@ EOF
 # MAIN
 # =============================
 print_banner
-check_qemu
+check_tools
 check_kvm
 
 case "${1:-}" in
     -s|--start)
-        start_vm
-        ;;
-    -h|--headless)
-        start_vm_headless
+        start_vm_gui
         ;;
     -k|--stop)
         stop_vm
@@ -265,18 +357,12 @@ case "${1:-}" in
         show_help
         ;;
     "")
-        # Nếu chưa có disk image, cài đặt
-        if [ ! -f "$DISK_IMAGE" ]; then
-            setup_vm
-            start_vm_install
-        else
-            # Nếu đã có, start VM headless (mặc định)
-            start_vm_headless
-        fi
+        setup_vm
+        start_vm
         ;;
     *)
-        print_error "Option không hợp lệ: $1"
-        echo "Chạy '$0 --help' để xem hướng dẫn"
+        print_error "Invalid option: $1"
+        echo "Run '$0 --help' for usage"
         exit 1
         ;;
 esac
