@@ -958,13 +958,13 @@ check_kvm
 
 case "${1:-}" in
     -s|--start)
-        select_disk_location
         show_host_specs
+        select_disk_location
         start_vm_gui
         ;;
     -m|--monitor)
-        select_disk_location
         show_host_specs
+        select_disk_location
         setup_vm
         start_vm_with_monitor
         ;;
@@ -1002,8 +1002,8 @@ case "${1:-}" in
         show_help
         ;;
     "")
-        select_disk_location
         show_host_specs
+        select_disk_location
         setup_vm
         start_vm
         ;;
