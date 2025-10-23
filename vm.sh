@@ -260,9 +260,9 @@ select_disk_location() {
         fi
         
         echo -e "  ${CYAN}[$num]${RESET} ${disks[$i]}"
-        echo "      Mount:     ${mount_points[$i]}"
-        echo "      Size:      ${sizes[$i]}"
-        echo "      Available: ${available_space[$i]}$is_default"
+        echo -e "      Mount:     ${mount_points[$i]}"
+        echo -e "      Size:      ${sizes[$i]}"
+        echo -e "      Available: ${available_space[$i]}$is_default"
         echo ""
     done
     
