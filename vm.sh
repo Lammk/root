@@ -13,18 +13,16 @@ VM_NAME="ubuntu-22.04"
 VM_DIR="$HOME/VMs/$VM_NAME"
 IMG_URL="https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
 IMG_FILE="$VM_DIR/ubuntu-base.img"
-PERSISTENT_DISK="$VM_DIR/persistent.qcow2"
 SEED_FILE="$VM_DIR/seed.iso"
 
 # VM Specs
 RAM="8G"
 CPU_CORES="2"
 DISK_SIZE="40G"
-PERSISTENT_SIZE="20G"
 SSH_PORT="2222"
 
 # I/O and stability settings
-IO_THREADS="4"  # Number of I/O threads for disk operations
+IO_THREADS="1"  # Number of I/O threads for disk operations
 
 # Freeze detection settings
 FREEZE_CHECK_INTERVAL="10"  # Seconds between freeze checks
@@ -100,6 +98,113 @@ check_tools() {
     fi
     
     print_info "All required tools found ✓"
+}
+
+show_host_specs() {
+    echo ""
+    echo -e "${CYAN}╔════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${CYAN}║          HOST SYSTEM SPECIFICATIONS                ║${RESET}"
+    echo -e "${CYAN}╚════════════════════════════════════════════════════╝${RESET}"
+    echo ""
+    
+    # CPU Info
+    local cpu_model=$(lscpu | grep "Model name" | cut -d: -f2 | xargs)
+    local cpu_cores=$(nproc)
+    local cpu_threads=$(lscpu | grep "^CPU(s):" | awk '{print $2}')
+    echo -e "${GREEN}CPU:${RESET}"
+    echo "  Model:   $cpu_model"
+    echo "  Cores:   $cpu_cores physical cores"
+    echo "  Threads: $cpu_threads logical processors"
+    echo ""
+    
+    # RAM Info
+    local total_ram=$(free -h | awk '/^Mem:/{print $2}')
+    local used_ram=$(free -h | awk '/^Mem:/{print $3}')
+    local free_ram=$(free -h | awk '/^Mem:/{print $4}')
+    local available_ram=$(free -h | awk '/^Mem:/{print $7}')
+    echo -e "${GREEN}RAM:${RESET}"
+    echo "  Total:     $total_ram"
+    echo "  Used:      $used_ram"
+    echo "  Free:      $free_ram"
+    echo "  Available: $available_ram"
+    echo ""
+    
+    # Disk Info
+    echo -e "${GREEN}DISKS:${RESET}"
+    df -h | grep -E '^/dev/' | while read -r line; do
+        local device=$(echo "$line" | awk '{print $1}')
+        local size=$(echo "$line" | awk '{print $2}')
+        local used=$(echo "$line" | awk '{print $3}')
+        local avail=$(echo "$line" | awk '{print $4}')
+        local use_pct=$(echo "$line" | awk '{print $5}')
+        local mount=$(echo "$line" | awk '{print $6}')
+        echo "  $device"
+        echo "    Size:      $size"
+        echo "    Used:      $used ($use_pct)"
+        echo "    Available: $avail"
+        echo "    Mount:     $mount"
+        echo ""
+    done
+    
+    # VM Requirements
+    echo -e "${CYAN}╔════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${CYAN}║          VM REQUIREMENTS                           ║${RESET}"
+    echo -e "${CYAN}╚════════════════════════════════════════════════════╝${RESET}"
+    echo ""
+    echo -e "${YELLOW}This VM will use:${RESET}"
+    echo "  RAM:     $RAM"
+    echo "  CPU:     $CPU_CORES cores"
+    echo "  Storage: $DISK_SIZE (will grow as needed)"
+    echo ""
+    
+    # Check if resources are sufficient
+    local total_ram_gb=$(free -g | awk '/^Mem:/{print $2}')
+    local vm_ram_gb=$(echo "$RAM" | sed 's/G//')
+    local available_ram_gb=$(free -g | awk '/^Mem:/{print $7}')
+    
+    local warnings=0
+    
+    if [ "$available_ram_gb" -lt "$vm_ram_gb" ]; then
+        echo -e "${RED}⚠ WARNING: Not enough available RAM!${RESET}"
+        echo "  VM needs: ${vm_ram_gb}G"
+        echo "  Available: ${available_ram_gb}G"
+        warnings=$((warnings + 1))
+    fi
+    
+    if [ "$cpu_cores" -lt "$CPU_CORES" ]; then
+        echo -e "${RED}⚠ WARNING: Not enough CPU cores!${RESET}"
+        echo "  VM needs: $CPU_CORES cores"
+        echo "  Available: $cpu_cores cores"
+        warnings=$((warnings + 1))
+    fi
+    
+    # Check disk space for VM directory
+    mkdir -p "$VM_DIR" 2>/dev/null || true
+    local vm_disk_free=$(df -BG "$VM_DIR" 2>/dev/null | awk 'NR==2{print $4}' | sed 's/G//' || echo "100")
+    local disk_needed=$(echo "$DISK_SIZE" | sed 's/G//')
+    
+    if [ "$vm_disk_free" -lt "$disk_needed" ]; then
+        echo -e "${RED}⚠ WARNING: Not enough disk space!${RESET}"
+        echo "  VM needs: ${disk_needed}G"
+        echo "  Available: ${vm_disk_free}G in $VM_DIR"
+        warnings=$((warnings + 1))
+    fi
+    
+    echo ""
+    if [ $warnings -eq 0 ]; then
+        echo -e "${GREEN}✓ All system requirements met!${RESET}"
+    else
+        echo -e "${RED}✗ $warnings warning(s) found!${RESET}"
+    fi
+    echo ""
+    
+    # Ask to continue
+    read -p "Do you want to continue? (y/N): " -n 1 -r
+    echo ""
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        print_info "Setup cancelled by user"
+        exit 0
+    fi
 }
 
 check_resources() {
@@ -261,11 +366,6 @@ EOF
         print_info "VM image already exists, skipping download"
     fi
     
-    # Create persistent disk if not exists
-    if [ ! -f "$PERSISTENT_DISK" ]; then
-        print_info "Creating persistent disk ($PERSISTENT_SIZE)..."
-        qemu-img create -f qcow2 "$PERSISTENT_DISK" "$PERSISTENT_SIZE"
-    fi
 }
 
 cleanup() {
@@ -341,11 +441,8 @@ start_vm() {
         -m "$RAM" \
         -smp "$CPU_CORES",cores="$CPU_CORES",threads=1,sockets=1,maxcpus="$CPU_CORES" \
         -object iothread,id=io1 \
-        -object iothread,id=io2 \
         -drive file="$IMG_FILE",format=qcow2,if=none,id=drive0,cache="$CACHE_MODE",aio="$AIO_MODE",discard=unmap \
         -device virtio-blk-pci,drive=drive0,iothread=io1,num-queues="$CPU_CORES" \
-        -drive file="$PERSISTENT_DISK",format=qcow2,if=none,id=drive1,cache="$CACHE_MODE",aio="$AIO_MODE",discard=unmap \
-        -device virtio-blk-pci,drive=drive1,iothread=io2,num-queues="$CPU_CORES" \
         -drive file="$SEED_FILE",format=raw,if=virtio,cache=none,readonly=on \
         -boot order=c,menu=off,strict=on \
         $EXTRA_FLAGS \
@@ -406,11 +503,8 @@ start_vm_gui() {
         -m "$RAM" \
         -smp "$CPU_CORES",cores="$CPU_CORES",threads=1,sockets=1,maxcpus="$CPU_CORES" \
         -object iothread,id=io1 \
-        -object iothread,id=io2 \
         -drive file="$IMG_FILE",format=qcow2,if=none,id=drive0,cache="$CACHE_MODE",aio="$AIO_MODE",discard=unmap \
         -device virtio-blk-pci,drive=drive0,iothread=io1,num-queues="$CPU_CORES" \
-        -drive file="$PERSISTENT_DISK",format=qcow2,if=none,id=drive1,cache="$CACHE_MODE",aio="$AIO_MODE",discard=unmap \
-        -device virtio-blk-pci,drive=drive1,iothread=io2,num-queues="$CPU_CORES" \
         -drive file="$SEED_FILE",format=raw,if=virtio,cache=none,readonly=on \
         -boot order=c,menu=off,strict=on \
         $EXTRA_FLAGS \
@@ -705,6 +799,7 @@ Terminal Controls:
   Monitor:  Ctrl+A, then C
 
 Features:
+  ✓ Host system specs check before start
   ✓ Auto-login to terminal after boot
   ✓ Cloud-init auto-configuration
   ✓ SSH ready on port $SSH_PORT
@@ -714,8 +809,7 @@ Features:
 
 Files:
   VM Dir:   $VM_DIR
-  Image:    $IMG_FILE
-  Disk:     $PERSISTENT_DISK
+  Image:    $IMG_FILE (40GB)
 EOF
 }
 
@@ -728,9 +822,11 @@ check_kvm
 
 case "${1:-}" in
     -s|--start)
+        show_host_specs
         start_vm_gui
         ;;
     -m|--monitor)
+        show_host_specs
         setup_vm
         start_vm_with_monitor
         ;;
@@ -744,6 +840,7 @@ case "${1:-}" in
         show_help
         ;;
     "")
+        show_host_specs
         setup_vm
         start_vm
         ;;
