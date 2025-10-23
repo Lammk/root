@@ -23,6 +23,10 @@ DISK_SIZE="40G"
 PERSISTENT_SIZE="20G"
 SSH_PORT="2222"
 
+# I/O and stability settings
+IO_THREADS="4"  # Number of I/O threads for disk operations
+WATCHDOG_TIMEOUT="30"  # Watchdog timeout in seconds
+
 # Credentials
 HOSTNAME="ubuntu-vm"
 USERNAME="ubuntu"
@@ -141,16 +145,17 @@ check_resources() {
 check_kvm() {
     if [ -r /dev/kvm ]; then
         print_info "KVM acceleration available ✓"
-        # CPU host passthrough with safe features (compatible with most CPUs)
-        KVM_FLAG="-enable-kvm -cpu host"
+        # CPU host passthrough with safe features
+        KVM_FLAG="-enable-kvm -cpu host,migratable=on"
         USE_KVM=true
     else
         print_warn "KVM not available, using TCG (software emulation)"
         print_warn "To enable KVM: sudo modprobe kvm-intel (or kvm-amd)"
         print_info "Applying TCG optimizations..."
         
-        # TCG optimizations for better performance without KVM
-        KVM_FLAG="-accel tcg,thread=multi"
+        # TCG optimizations - FIXED: proper thread configuration
+        # tb-size: Translation block cache size (larger = better for TCG)
+        KVM_FLAG="-accel tcg,thread=multi,tb-size=1024"
         USE_KVM=false
         
         # Reduce RAM for TCG (less overhead)
@@ -159,11 +164,9 @@ check_kvm() {
             print_info "Reduced RAM to 4G for TCG mode"
         fi
         
-        # Reduce CPU cores for TCG (better single-thread performance)
-        if [ "$CPU_CORES" = "2" ]; then
-            CPU_CORES="1"
-            print_info "Reduced CPU cores to 1 for TCG mode"
-        fi
+        # Keep 2 cores for TCG multi-threading (better than 1)
+        # TCG can benefit from 2 threads
+        print_info "Using 2 CPU cores for TCG multi-threading"
         
         # Enable SWAP for TCG mode (compensate for less RAM)
         SWAP_SIZE="4G"
@@ -317,28 +320,47 @@ start_vm() {
         EXTRA_FLAGS="-device virtio-net-pci,netdev=n0,mq=on,vectors=4"
     fi
     
+    # CRITICAL FIX: cache=unsafe causes data corruption and freezes
+    # Use cache=writeback with proper AIO for stability
+    local CACHE_MODE="writeback"
+    local AIO_MODE="native"  # native is faster and more stable than threads
+    
+    # For TCG, use threads AIO (native requires KVM)
+    if [ "$USE_KVM" = false ]; then
+        AIO_MODE="threads"
+    fi
+    
     exec qemu-system-x86_64 \
         $KVM_FLAG \
-        -machine hpet=off \
+        -machine q35,accel=$([ "$USE_KVM" = true ] && echo "kvm" || echo "tcg"),kernel_irqchip=on \
         -m "$RAM" \
-        -smp "$CPU_CORES",cores="$CPU_CORES",threads=1,sockets=1 \
-        -drive file="$IMG_FILE",format=qcow2,if=virtio,cache=unsafe,aio=threads,discard=unmap \
-        -drive file="$PERSISTENT_DISK",format=qcow2,if=virtio,cache=unsafe,aio=threads,discard=unmap \
-        -drive file="$SEED_FILE",format=raw,if=virtio,cache=unsafe \
+        -smp "$CPU_CORES",cores="$CPU_CORES",threads=1,sockets=1,maxcpus="$CPU_CORES" \
+        -object iothread,id=io1 \
+        -object iothread,id=io2 \
+        -drive file="$IMG_FILE",format=qcow2,if=none,id=drive0,cache="$CACHE_MODE",aio="$AIO_MODE",discard=unmap \
+        -device virtio-blk-pci,drive=drive0,iothread=io1,num-queues="$CPU_CORES" \
+        -drive file="$PERSISTENT_DISK",format=qcow2,if=none,id=drive1,cache="$CACHE_MODE",aio="$AIO_MODE",discard=unmap \
+        -device virtio-blk-pci,drive=drive1,iothread=io2,num-queues="$CPU_CORES" \
+        -drive file="$SEED_FILE",format=raw,if=virtio,cache=none,readonly=on \
         -boot order=c,menu=off,strict=on \
         $EXTRA_FLAGS \
-        -netdev user,id=n0,hostfwd=tcp::"$SSH_PORT"-:22 \
-        -device virtio-balloon-pci,id=balloon0,deflate-on-oom=on \
+        -netdev user,id=n0,hostfwd=tcp::"$SSH_PORT"-:22,net=10.0.2.0/24,dhcpstart=10.0.2.15 \
+        -device virtio-balloon-pci,id=balloon0,deflate-on-oom=on,free-page-reporting=on \
+        -device virtio-rng-pci,rng=rng0 \
+        -object rng-random,id=rng0,filename=/dev/urandom \
+        -watchdog i6300esb \
+        -watchdog-action reset \
         -nographic \
         -serial mon:stdio \
         -no-reboot \
-        -no-shutdown \
         -rtc base=localtime,clock=host,driftfix=slew \
         -global kvm-pit.lost_tick_policy=discard \
         -overcommit mem-lock=off \
+        -overcommit cpu-pm=on \
         -msg timestamp=on \
         -D "$LOG_FILE" \
-        -name "$VM_NAME",process="$VM_NAME"
+        -pidfile "$VM_DIR/qemu.pid" \
+        -name "$VM_NAME",process="$VM_NAME",debug-threads=on
 }
 
 start_vm_gui() {
@@ -367,28 +389,45 @@ start_vm_gui() {
         EXTRA_FLAGS="-device virtio-net-pci,netdev=n0,mq=on,vectors=4"
     fi
     
+    # CRITICAL FIX: cache=unsafe causes data corruption and freezes
+    local CACHE_MODE="writeback"
+    local AIO_MODE="native"
+    
+    if [ "$USE_KVM" = false ]; then
+        AIO_MODE="threads"
+    fi
+    
     exec qemu-system-x86_64 \
         $KVM_FLAG \
-        -machine hpet=off \
+        -machine q35,accel=$([ "$USE_KVM" = true ] && echo "kvm" || echo "tcg"),kernel_irqchip=on \
         -m "$RAM" \
-        -smp "$CPU_CORES",cores="$CPU_CORES",threads=1,sockets=1 \
-        -drive file="$IMG_FILE",format=qcow2,if=virtio,cache=unsafe,aio=threads,discard=unmap \
-        -drive file="$PERSISTENT_DISK",format=qcow2,if=virtio,cache=unsafe,aio=threads,discard=unmap \
-        -drive file="$SEED_FILE",format=raw,if=virtio,cache=unsafe \
+        -smp "$CPU_CORES",cores="$CPU_CORES",threads=1,sockets=1,maxcpus="$CPU_CORES" \
+        -object iothread,id=io1 \
+        -object iothread,id=io2 \
+        -drive file="$IMG_FILE",format=qcow2,if=none,id=drive0,cache="$CACHE_MODE",aio="$AIO_MODE",discard=unmap \
+        -device virtio-blk-pci,drive=drive0,iothread=io1,num-queues="$CPU_CORES" \
+        -drive file="$PERSISTENT_DISK",format=qcow2,if=none,id=drive1,cache="$CACHE_MODE",aio="$AIO_MODE",discard=unmap \
+        -device virtio-blk-pci,drive=drive1,iothread=io2,num-queues="$CPU_CORES" \
+        -drive file="$SEED_FILE",format=raw,if=virtio,cache=none,readonly=on \
         -boot order=c,menu=off,strict=on \
         $EXTRA_FLAGS \
-        -netdev user,id=n0,hostfwd=tcp::"$SSH_PORT"-:22 \
-        -device virtio-balloon-pci,id=balloon0,deflate-on-oom=on \
+        -netdev user,id=n0,hostfwd=tcp::"$SSH_PORT"-:22,net=10.0.2.0/24,dhcpstart=10.0.2.15 \
+        -device virtio-balloon-pci,id=balloon0,deflate-on-oom=on,free-page-reporting=on \
+        -device virtio-rng-pci,rng=rng0 \
+        -object rng-random,id=rng0,filename=/dev/urandom \
+        -watchdog i6300esb \
+        -watchdog-action reset \
         -vga virtio \
-        -display gtk \
+        -display gtk,gl=on \
         -no-reboot \
-        -no-shutdown \
         -rtc base=localtime,clock=host,driftfix=slew \
         -global kvm-pit.lost_tick_policy=discard \
         -overcommit mem-lock=off \
+        -overcommit cpu-pm=on \
         -msg timestamp=on \
         -D "$LOG_FILE" \
-        -name "$VM_NAME",process="$VM_NAME"
+        -pidfile "$VM_DIR/qemu.pid" \
+        -name "$VM_NAME",process="$VM_NAME",debug-threads=on
 }
 
 vm_info() {
