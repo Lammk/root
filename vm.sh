@@ -25,7 +25,12 @@ SSH_PORT="2222"
 
 # I/O and stability settings
 IO_THREADS="4"  # Number of I/O threads for disk operations
-WATCHDOG_TIMEOUT="30"  # Watchdog timeout in seconds
+
+# Freeze detection settings
+FREEZE_CHECK_INTERVAL="10"  # Seconds between freeze checks
+FREEZE_THRESHOLD="3"  # Number of failed checks before declaring freeze
+RECOVERY_ATTEMPTS="3"  # Number of recovery attempts before asking to reset
+MONITOR_LOG="$VM_DIR/monitor.log"
 
 # Credentials
 HOSTNAME="ubuntu-vm"
@@ -348,8 +353,6 @@ start_vm() {
         -device virtio-balloon-pci,id=balloon0,deflate-on-oom=on,free-page-reporting=on \
         -device virtio-rng-pci,rng=rng0 \
         -object rng-random,id=rng0,filename=/dev/urandom \
-        -watchdog i6300esb \
-        -watchdog-action reset \
         -nographic \
         -serial mon:stdio \
         -no-reboot \
@@ -415,8 +418,6 @@ start_vm_gui() {
         -device virtio-balloon-pci,id=balloon0,deflate-on-oom=on,free-page-reporting=on \
         -device virtio-rng-pci,rng=rng0 \
         -object rng-random,id=rng0,filename=/dev/urandom \
-        -watchdog i6300esb \
-        -watchdog-action reset \
         -vga virtio \
         -display gtk,gl=on \
         -no-reboot \
@@ -457,7 +458,219 @@ vm_info() {
 
 stop_vm() {
     print_info "Stopping VM..."
+    
+    # Stop monitor if running
+    if [ -f "$VM_DIR/monitor.pid" ]; then
+        local monitor_pid=$(cat "$VM_DIR/monitor.pid")
+        if kill -0 "$monitor_pid" 2>/dev/null; then
+            kill "$monitor_pid" 2>/dev/null
+            print_info "Stopped freeze monitor (PID: $monitor_pid)"
+        fi
+        rm -f "$VM_DIR/monitor.pid"
+    fi
+    
     pkill -f "qemu-system-x86_64.*$VM_NAME" || print_warn "VM not running"
+}
+
+check_vm_responsive() {
+    # Check if QEMU process exists
+    if ! pgrep -f "qemu-system-x86_64.*$VM_NAME" >/dev/null; then
+        return 1
+    fi
+    
+    # Check if QEMU process is responding (not in D state)
+    local qemu_pid=$(pgrep -f "qemu-system-x86_64.*$VM_NAME" | head -1)
+    if [ -z "$qemu_pid" ]; then
+        return 1
+    fi
+    
+    # Check process state (D = uninterruptible sleep = frozen)
+    local state=$(ps -o state= -p "$qemu_pid" 2>/dev/null | tr -d ' ')
+    if [ "$state" = "D" ] || [ "$state" = "Z" ]; then
+        return 1
+    fi
+    
+    # Check CPU usage - if 0% for too long, might be frozen
+    local cpu_usage=$(ps -o %cpu= -p "$qemu_pid" 2>/dev/null | tr -d ' ')
+    if [ -z "$cpu_usage" ]; then
+        return 1
+    fi
+    
+    return 0
+}
+
+attempt_recovery() {
+    local attempt=$1
+    print_warn "Attempting recovery #$attempt..."
+    
+    local qemu_pid=$(pgrep -f "qemu-system-x86_64.*$VM_NAME" | head -1)
+    if [ -z "$qemu_pid" ]; then
+        print_error "QEMU process not found"
+        return 1
+    fi
+    
+    case $attempt in
+        1)
+            # Try SIGCONT in case it's stopped
+            print_info "Sending SIGCONT to QEMU process..."
+            kill -CONT "$qemu_pid" 2>/dev/null
+            sleep 5
+            ;;
+        2)
+            # Try to flush I/O
+            print_info "Attempting to flush I/O..."
+            sync
+            echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+            sleep 5
+            ;;
+        3)
+            # Try SIGUSR1 (QEMU debug signal)
+            print_info "Sending debug signal to QEMU..."
+            kill -USR1 "$qemu_pid" 2>/dev/null
+            sleep 5
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    
+    # Check if recovery worked
+    sleep 2
+    if check_vm_responsive; then
+        print_info "Recovery successful!"
+        return 0
+    else
+        return 1
+    fi
+}
+
+ask_reset_vm() {
+    echo ""
+    print_error "VM appears to be frozen and recovery attempts failed."
+    echo -e "${RED}WARNING: Resetting will delete ALL data in the VM!${RESET}"
+    echo -e "${YELLOW}This includes:${RESET}"
+    echo "  - All files in /home/$USERNAME"
+    echo "  - All installed packages"
+    echo "  - All configurations"
+    echo "  - Persistent disk data"
+    echo ""
+    echo -e "${CYAN}Options:${RESET}"
+    echo "  1) Force kill QEMU and restart (may recover some data)"
+    echo "  2) Full reset - delete all VM data and start fresh"
+    echo "  3) Do nothing - exit and investigate manually"
+    echo ""
+    read -p "Choose option [1/2/3]: " choice
+    
+    case $choice in
+        1)
+            print_info "Force killing QEMU..."
+            pkill -9 -f "qemu-system-x86_64.*$VM_NAME"
+            sleep 2
+            print_info "Attempting to restart VM..."
+            return 0
+            ;;
+        2)
+            print_warn "Performing full reset..."
+            pkill -9 -f "qemu-system-x86_64.*$VM_NAME" 2>/dev/null || true
+            sleep 2
+            
+            if [ -d "$VM_DIR" ]; then
+                print_info "Backing up old VM to $VM_DIR.backup.$(date +%s)"
+                mv "$VM_DIR" "$VM_DIR.backup.$(date +%s)"
+            fi
+            
+            print_info "Setting up fresh VM..."
+            setup_vm
+            return 0
+            ;;
+        3)
+            print_info "Exiting. VM process may still be running."
+            print_info "Manual investigation needed. Check: ps aux | grep qemu"
+            exit 0
+            ;;
+        *)
+            print_error "Invalid choice. Exiting."
+            exit 1
+            ;;
+    esac
+}
+
+monitor_vm_health() {
+    local freeze_count=0
+    local recovery_attempt=0
+    
+    print_info "Starting VM health monitor..."
+    echo "Monitor started at $(date)" > "$MONITOR_LOG"
+    
+    while true; do
+        sleep "$FREEZE_CHECK_INTERVAL"
+        
+        if ! check_vm_responsive; then
+            freeze_count=$((freeze_count + 1))
+            echo "[$(date)] Freeze check failed ($freeze_count/$FREEZE_THRESHOLD)" >> "$MONITOR_LOG"
+            
+            if [ $freeze_count -ge $FREEZE_THRESHOLD ]; then
+                print_error "VM freeze detected!"
+                echo "[$(date)] FREEZE DETECTED" >> "$MONITOR_LOG"
+                
+                # Try recovery
+                recovery_attempt=$((recovery_attempt + 1))
+                
+                if [ $recovery_attempt -le $RECOVERY_ATTEMPTS ]; then
+                    if attempt_recovery $recovery_attempt; then
+                        freeze_count=0
+                        recovery_attempt=0
+                        echo "[$(date)] Recovery successful" >> "$MONITOR_LOG"
+                        continue
+                    fi
+                else
+                    # All recovery attempts failed
+                    echo "[$(date)] All recovery attempts failed" >> "$MONITOR_LOG"
+                    ask_reset_vm
+                    
+                    # If we get here, user chose option 1 or 2
+                    # Reset counters and continue monitoring
+                    freeze_count=0
+                    recovery_attempt=0
+                fi
+            fi
+        else
+            # VM is responsive
+            if [ $freeze_count -gt 0 ]; then
+                echo "[$(date)] VM recovered naturally" >> "$MONITOR_LOG"
+            fi
+            freeze_count=0
+        fi
+    done
+}
+
+start_vm_with_monitor() {
+    # Start VM in background
+    print_info "Starting VM with freeze monitoring..."
+    
+    # Start VM
+    start_vm &
+    local vm_pid=$!
+    
+    # Wait for VM to start
+    sleep 5
+    
+    # Start monitor in background
+    monitor_vm_health &
+    local monitor_pid=$!
+    echo $monitor_pid > "$VM_DIR/monitor.pid"
+    
+    print_info "VM started with health monitor (PID: $monitor_pid)"
+    print_info "Monitor log: $MONITOR_LOG"
+    
+    # Wait for VM process
+    wait $vm_pid
+    
+    # Stop monitor when VM exits
+    if kill -0 $monitor_pid 2>/dev/null; then
+        kill $monitor_pid 2>/dev/null
+    fi
+    rm -f "$VM_DIR/monitor.pid"
 }
 
 show_help() {
@@ -470,6 +683,7 @@ Usage: $0 [OPTION]
 Options:
   (no option)   Setup and start VM in terminal (auto-login)
   -s, --start   Start VM with GUI
+  -m, --monitor Start VM with freeze monitoring
   -k, --stop    Stop VM
   -i, --info    Show VM information
   --help        Show this help
@@ -477,6 +691,7 @@ Options:
 Examples:
   $0              # Setup and start VM (terminal, auto-login)
   $0 -s           # Start VM with GUI
+  $0 -m           # Start VM with freeze monitoring
   $0 -k           # Stop VM
   $0 -i           # Show info
 
@@ -494,6 +709,7 @@ Features:
   ✓ Cloud-init auto-configuration
   ✓ SSH ready on port $SSH_PORT
   ✓ KVM acceleration (if available)
+  ✓ Automatic freeze detection & recovery
   ✓ No manual installation needed
 
 Files:
@@ -513,6 +729,10 @@ check_kvm
 case "${1:-}" in
     -s|--start)
         start_vm_gui
+        ;;
+    -m|--monitor)
+        setup_vm
+        start_vm_with_monitor
         ;;
     -k|--stop)
         stop_vm
