@@ -288,10 +288,11 @@ start_vm() {
     
     exec qemu-system-x86_64 \
         $KVM_FLAG \
+        -machine hpet=off \
         -m "$RAM" \
         -smp "$CPU_CORES",cores="$CPU_CORES",threads=1,sockets=1 \
-        -drive file="$IMG_FILE",format=qcow2,if=virtio,cache=unsafe,aio=native,discard=unmap \
-        -drive file="$PERSISTENT_DISK",format=qcow2,if=virtio,cache=unsafe,aio=native,discard=unmap \
+        -drive file="$IMG_FILE",format=qcow2,if=virtio,cache=unsafe,aio=threads,discard=unmap \
+        -drive file="$PERSISTENT_DISK",format=qcow2,if=virtio,cache=unsafe,aio=threads,discard=unmap \
         -drive file="$SEED_FILE",format=raw,if=virtio,cache=unsafe \
         -boot order=c,menu=off,strict=on \
         -device virtio-net-pci,netdev=n0,mq=on,vectors=4 \
@@ -303,7 +304,6 @@ start_vm() {
         -no-shutdown \
         -rtc base=localtime,clock=host,driftfix=slew \
         -global kvm-pit.lost_tick_policy=discard \
-        -no-hpet \
         -overcommit mem-lock=off \
         -msg timestamp=on \
         -D "$LOG_FILE" \
@@ -327,10 +327,11 @@ start_vm_gui() {
     
     exec qemu-system-x86_64 \
         $KVM_FLAG \
+        -machine hpet=off \
         -m "$RAM" \
         -smp "$CPU_CORES",cores="$CPU_CORES",threads=1,sockets=1 \
-        -drive file="$IMG_FILE",format=qcow2,if=virtio,cache=unsafe,aio=native,discard=unmap \
-        -drive file="$PERSISTENT_DISK",format=qcow2,if=virtio,cache=unsafe,aio=native,discard=unmap \
+        -drive file="$IMG_FILE",format=qcow2,if=virtio,cache=unsafe,aio=threads,discard=unmap \
+        -drive file="$PERSISTENT_DISK",format=qcow2,if=virtio,cache=unsafe,aio=threads,discard=unmap \
         -drive file="$SEED_FILE",format=raw,if=virtio,cache=unsafe \
         -boot order=c,menu=off,strict=on \
         -device virtio-net-pci,netdev=n0,mq=on,vectors=4 \
@@ -342,7 +343,6 @@ start_vm_gui() {
         -no-shutdown \
         -rtc base=localtime,clock=host,driftfix=slew \
         -global kvm-pit.lost_tick_policy=discard \
-        -no-hpet \
         -overcommit mem-lock=off \
         -msg timestamp=on \
         -D "$LOG_FILE" \
