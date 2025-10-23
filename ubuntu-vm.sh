@@ -142,12 +142,32 @@ check_kvm() {
     if [ -r /dev/kvm ]; then
         print_info "KVM acceleration available ✓"
         # CPU host passthrough with safe features (compatible with most CPUs)
-        # Removed potentially unsupported features to prevent crashes
         KVM_FLAG="-enable-kvm -cpu host"
+        USE_KVM=true
     else
-        print_warn "KVM not available, using TCG (slower)"
+        print_warn "KVM not available, using TCG (software emulation)"
         print_warn "To enable KVM: sudo modprobe kvm-intel (or kvm-amd)"
-        KVM_FLAG="-accel tcg"
+        print_info "Applying TCG optimizations..."
+        
+        # TCG optimizations for better performance without KVM
+        KVM_FLAG="-accel tcg,thread=multi"
+        USE_KVM=false
+        
+        # Reduce RAM for TCG (less overhead)
+        if [ "$RAM" = "8G" ]; then
+            RAM="4G"
+            print_info "Reduced RAM to 4G for TCG mode"
+        fi
+        
+        # Reduce CPU cores for TCG (better single-thread performance)
+        if [ "$CPU_CORES" = "2" ]; then
+            CPU_CORES="1"
+            print_info "Reduced CPU cores to 1 for TCG mode"
+        fi
+        
+        # Enable SWAP for TCG mode (compensate for less RAM)
+        SWAP_SIZE="4G"
+        print_info "Enabled 4G SWAP for TCG mode"
     fi
 }
 
@@ -286,6 +306,17 @@ start_vm() {
     # Create log file for debugging
     local LOG_FILE="$VM_DIR/qemu.log"
     
+    # TCG-specific optimizations
+    local EXTRA_FLAGS=""
+    if [ "$USE_KVM" = false ]; then
+        print_info "Using TCG optimizations for better performance..."
+        # Simpler network for TCG (no multi-queue)
+        EXTRA_FLAGS="-device virtio-net-pci,netdev=n0"
+    else
+        # Full features for KVM
+        EXTRA_FLAGS="-device virtio-net-pci,netdev=n0,mq=on,vectors=4"
+    fi
+    
     exec qemu-system-x86_64 \
         $KVM_FLAG \
         -machine hpet=off \
@@ -295,7 +326,7 @@ start_vm() {
         -drive file="$PERSISTENT_DISK",format=qcow2,if=virtio,cache=unsafe,aio=threads,discard=unmap \
         -drive file="$SEED_FILE",format=raw,if=virtio,cache=unsafe \
         -boot order=c,menu=off,strict=on \
-        -device virtio-net-pci,netdev=n0,mq=on,vectors=4 \
+        $EXTRA_FLAGS \
         -netdev user,id=n0,hostfwd=tcp::"$SSH_PORT"-:22 \
         -device virtio-balloon-pci,id=balloon0,deflate-on-oom=on \
         -nographic \
@@ -325,6 +356,17 @@ start_vm_gui() {
     # Create log file for debugging
     local LOG_FILE="$VM_DIR/qemu.log"
     
+    # TCG-specific optimizations
+    local EXTRA_FLAGS=""
+    if [ "$USE_KVM" = false ]; then
+        print_info "Using TCG optimizations for better performance..."
+        # Simpler network for TCG (no multi-queue)
+        EXTRA_FLAGS="-device virtio-net-pci,netdev=n0"
+    else
+        # Full features for KVM
+        EXTRA_FLAGS="-device virtio-net-pci,netdev=n0,mq=on,vectors=4"
+    fi
+    
     exec qemu-system-x86_64 \
         $KVM_FLAG \
         -machine hpet=off \
@@ -334,7 +376,7 @@ start_vm_gui() {
         -drive file="$PERSISTENT_DISK",format=qcow2,if=virtio,cache=unsafe,aio=threads,discard=unmap \
         -drive file="$SEED_FILE",format=raw,if=virtio,cache=unsafe \
         -boot order=c,menu=off,strict=on \
-        -device virtio-net-pci,netdev=n0,mq=on,vectors=4 \
+        $EXTRA_FLAGS \
         -netdev user,id=n0,hostfwd=tcp::"$SSH_PORT"-:22 \
         -device virtio-balloon-pci,id=balloon0,deflate-on-oom=on \
         -vga virtio \
