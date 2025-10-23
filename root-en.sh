@@ -1,7 +1,7 @@
 
 #!/usr/bin/env bash
-# Strict mode for better error handling
-set -euo pipefail
+# Don't use set -e to prevent script exit on minor errors in proot environment
+set -uo pipefail
 IFS=$'\n\t'
 
 # =============================
@@ -16,8 +16,9 @@ PROOT_BIN="${PROOT_BIN:-$HOME/.local/bin/proot}"
 MAX_RETRIES="${MAX_RETRIES:-3}"
 TIMEOUT="${TIMEOUT:-30}"
 ARCH="$(uname -m)"
-ALPINE_ARCH=""
-ARCH_ALT=""  # Initialize to avoid unbound variable
+ALPINE_ARCH="${ALPINE_ARCH:-}"
+ARCH_ALT="${ARCH_ALT:-}"
+ROOTFS_FILE="${ROOTFS_FILE:-}"  # Initialize to avoid unbound variable
 
 # Script version
 SCRIPT_VERSION="2.0.0"
@@ -369,6 +370,12 @@ EOF
         fix_ssl_certificates
     fi
     
+    # Fix permissions and install ca-certificates for Alpine
+    if [[ "$DISTRO_NAME" == "Alpine Linux" ]]; then
+        print_info "Configuring Alpine Linux..."
+        fix_alpine_permissions
+    fi
+    
     # Mark as installed
     {
         echo "$DISTRO_NAME"
@@ -378,6 +385,44 @@ EOF
     touch "$ROOTFS_DIR/.installed"
     
     print_info "Installation of $DISTRO_NAME complete!"
+}
+
+# =============================
+# FIX ALPINE PERMISSIONS
+# =============================
+fix_alpine_permissions() {
+    print_info "Fixing Alpine permissions and preparing apk..."
+    
+    # Create and fix permissions for apk directories
+    mkdir -p "$ROOTFS_DIR/var/cache/apk"
+    mkdir -p "$ROOTFS_DIR/etc/apk"
+    mkdir -p "$ROOTFS_DIR/lib/apk/db"
+    
+    chmod 755 "$ROOTFS_DIR/var/cache/apk" 2>/dev/null || true
+    chmod 755 "$ROOTFS_DIR/etc/apk" 2>/dev/null || true
+    chmod 755 "$ROOTFS_DIR/lib/apk" 2>/dev/null || true
+    chmod 755 "$ROOTFS_DIR/lib/apk/db" 2>/dev/null || true
+    
+    # Create repositories file if not exists
+    if [ ! -f "$ROOTFS_DIR/etc/apk/repositories" ]; then
+        cat > "$ROOTFS_DIR/etc/apk/repositories" << 'REPOS_EOF'
+http://dl-cdn.alpinelinux.org/alpine/v3.20/main
+http://dl-cdn.alpinelinux.org/alpine/v3.20/community
+REPOS_EOF
+        chmod 644 "$ROOTFS_DIR/etc/apk/repositories"
+    fi
+    
+    # Create world file if not exists
+    touch "$ROOTFS_DIR/etc/apk/world"
+    chmod 644 "$ROOTFS_DIR/etc/apk/world" 2>/dev/null || true
+    
+    # Fix ownership (set to root)
+    if command -v chown &>/dev/null; then
+        chown -R 0:0 "$ROOTFS_DIR/var/cache/apk" 2>/dev/null || true
+        chown -R 0:0 "$ROOTFS_DIR/etc/apk" 2>/dev/null || true
+    fi
+    
+    print_info "Alpine permissions fixed"
 }
 
 # =============================
@@ -643,35 +688,63 @@ SSD_EOF
 #!/bin/bash
 # Script to fix APT GPG keys in Ubuntu/Debian rootfs
 
-echo "[*] Fixing APT GPG keys..."
+echo "[*] Fixing GPG keys and permissions..."
 
-# Fix permissions
-if [ -d /etc/apt/trusted.gpg.d ]; then
-    chmod 644 /etc/apt/trusted.gpg.d/*.gpg 2>/dev/null || true
-    chmod 755 /etc/apt/trusted.gpg.d 2>/dev/null || true
-fi
+# Fix permissions for keyrings (critical for _apt user)
+echo "[*] Fixing keyring permissions..."
+chmod 644 /etc/apt/trusted.gpg.d/*.gpg 2>/dev/null || true
+chmod 755 /etc/apt/trusted.gpg.d 2>/dev/null || true
+chmod 644 /usr/share/keyrings/*.gpg 2>/dev/null || true
+chmod 755 /usr/share/keyrings 2>/dev/null || true
 
-# Create apt user directory
+# Fix ownership (in proot, everything is root)
+chown -R root:root /etc/apt/trusted.gpg.d 2>/dev/null || true
+chown -R root:root /usr/share/keyrings 2>/dev/null || true
+
+# Create apt directories if missing
 mkdir -p /var/lib/apt/lists/partial
 chmod 755 /var/lib/apt/lists
 chmod 700 /var/lib/apt/lists/partial
 
-# Import Ubuntu archive keys if missing
-if command -v apt-key &>/dev/null; then
-    echo "[*] Importing Ubuntu archive keys..."
-    apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 871920D1991BC93C 2>/dev/null || true
-    apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3B4FE6ACC0B21F32 2>/dev/null || true
-    apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 871920D1991BC93C 2>/dev/null || true
+# Download and import Ubuntu keys directly
+echo "[*] Importing Ubuntu archive keys..."
+
+# Method 1: Import from Ubuntu keyserver
+if command -v gpg &>/dev/null; then
+    # Key 871920D1991BC93C - Ubuntu Archive Automatic Signing Key
+    gpg --keyserver keyserver.ubuntu.com --recv-keys 871920D1991BC93C 2>/dev/null || \
+    gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 871920D1991BC93C 2>/dev/null || true
+    
+    # Export to apt
+    gpg --export 871920D1991BC93C | apt-key add - 2>/dev/null || true
 fi
 
-# Temporarily disable signature check
+# Method 2: Use apt-key directly (deprecated but works)
+if command -v apt-key &>/dev/null; then
+    apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 871920D1991BC93C 2>/dev/null || \
+    apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 871920D1991BC93C 2>/dev/null || true
+    
+    # Additional Ubuntu keys
+    apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3B4FE6ACC0B21F32 2>/dev/null || true
+    apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 40976EAF437D05B5 2>/dev/null || true
+fi
+
+# Method 3: Allow unauthenticated as fallback
+echo "[*] Configuring apt to allow unauthenticated packages (fallback)..."
 cat > /etc/apt/apt.conf.d/99-proot-no-check << 'APTCONF'
 Acquire::AllowInsecureRepositories "true";
 Acquire::AllowDowngradeToInsecureRepositories "true";
 APT::Get::AllowUnauthenticated "true";
 APTCONF
 
+# Fix _apt user permissions issue
+echo "[*] Fixing _apt user permissions..."
+mkdir -p /var/cache/apt/archives/partial
+chmod 755 /var/cache/apt/archives
+chmod 700 /var/cache/apt/archives/partial
+
 echo "[*] Done! You can now run: apt update"
+echo "    If still errors, run: apt update --allow-insecure-repositories"
 FIXKEYS_EOF
     
     chmod +x "$ROOTFS_DIR/usr/local/bin/fix-apt-keys" 2>/dev/null || true
