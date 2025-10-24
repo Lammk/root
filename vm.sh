@@ -234,22 +234,33 @@ select_disk_location() {
     local max_space=0
     local max_space_index=0
     
-    # Parse filesystem output - use findmnt for reliable parsing
-    while read -r device mount fstype size used avail use_pct; do
+    # Parse filesystem output - use /proc/mounts for reliable device/mount mapping
+    # Then get size info from df for each mount point
+    while read -r device mount fstype options dump pass; do
         # Skip empty lines
         [ -z "$device" ] && continue
         
         # Only process real block devices
         [[ ! "$device" =~ ^/dev/ ]] && continue
         
-        # Skip if avail is 0 or dash (not available)
-        [[ "$avail" == "0" ]] || [[ "$avail" == "-" ]] && continue
-        
         # Validate mount point is actually a directory
         [ ! -d "$mount" ] && continue
         
         # Skip special filesystems
         [[ "$mount" =~ ^/(boot|snap|sys|proc|dev|run|tmp) ]] && continue
+        [[ "$mount" =~ /boot/efi$ ]] && continue
+        
+        # Get size info from df for this specific mount point
+        local df_info=$(df -h "$mount" 2>/dev/null | tail -1)
+        [ -z "$df_info" ] && continue
+        
+        local size=$(echo "$df_info" | awk '{print $2}')
+        local used=$(echo "$df_info" | awk '{print $3}')
+        local avail=$(echo "$df_info" | awk '{print $4}')
+        local use_pct=$(echo "$df_info" | awk '{print $5}')
+        
+        # Skip if avail is 0 or dash (not available)
+        [[ "$avail" == "0" ]] || [[ "$avail" == "-" ]] && continue
         
         # Validate fields
         [ -z "$device" ] || [ -z "$mount" ] || [ -z "$avail" ] && continue
@@ -257,11 +268,11 @@ select_disk_location() {
         # Convert to GB for comparison (handle different units properly)
         local avail_gb=0
         if [[ "$avail" =~ ^[0-9.]+G$ ]]; then
-            avail_gb=$(echo "$avail" | sed 's/G//' | cut -d. -f1)
+            avail_gb=$(echo "$avail" | sed 's/G//' | sed 's/,/\./' | cut -d. -f1)
         elif [[ "$avail" =~ ^[0-9.]+M$ ]]; then
             avail_gb=0
         elif [[ "$avail" =~ ^[0-9.]+T$ ]]; then
-            avail_gb=$(echo "$avail" | sed 's/T//' | awk '{print int($1*1024)}')
+            avail_gb=$(echo "$avail" | sed 's/T//' | sed 's/,/\./' | awk '{print int($1*1024)}')
         elif [[ "$avail" =~ ^[0-9.]+K$ ]]; then
             avail_gb=0
         else
@@ -285,7 +296,7 @@ select_disk_location() {
         fi
         
         index=$((index + 1))
-    done < <(findmnt -n -o SOURCE,TARGET,FSTYPE,SIZE,USED,AVAIL,USE% 2>/dev/null || df -h --output=source,target,fstype,size,used,avail,pcent 2>/dev/null | grep -E '^/dev/' | tail -n +2)
+    done < /proc/mounts
     
     # Check if any disks found
     if [ "${#disks[@]}" -eq 0 ]; then
