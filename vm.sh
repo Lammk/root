@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Ubuntu 22.04 VM with QEMU - Auto Login Terminal
 # Modified from: quanvm0501 (BlackCatOfficial), BiraloGaming
-# RAM: 8GB, Storage: 40GB, CPU: 2 cores
+# RAM: 8GB, Storage: 20GB, CPU: 2 cores
 
 # Don't use set -e to prevent QEMU from killing itself on minor errors
 set -uo pipefail
@@ -29,7 +29,7 @@ IO_THREADS="1"  # Number of I/O threads for disk operations
 FREEZE_CHECK_INTERVAL="10"  # Seconds between freeze checks
 FREEZE_THRESHOLD="3"  # Number of failed checks before declaring freeze
 RECOVERY_ATTEMPTS="3"  # Number of recovery attempts before asking to reset
-MONITOR_LOG="$VM_DIR/monitor.log"
+MONITOR_LOG=""  # Will be set after VM_DIR is defined
 
 # Credentials
 HOSTNAME="ubuntu-vm"
@@ -179,15 +179,25 @@ show_host_specs() {
         warnings=$((warnings + 1))
     fi
     
-    # Check disk space for VM directory
-    mkdir -p "$VM_DIR" 2>/dev/null || true
-    local vm_disk_free=$(df -BG "$VM_DIR" 2>/dev/null | awk 'NR==2{print $4}' | sed 's/G//' || echo "100")
-    local disk_needed=$(echo "$DISK_SIZE" | sed 's/G//')
+    # Check disk space for VM directory (only if VM_DIR is set)
+    if [ -n "$VM_DIR" ]; then
+        mkdir -p "$VM_DIR" 2>/dev/null || true
+        local vm_disk_free=$(df -BG "$VM_DIR" 2>/dev/null | awk 'NR==2{print $4}' | sed 's/G//' || echo "100")
+        local disk_needed=$(echo "$DISK_SIZE" | sed 's/G//')
+    else
+        # Use home directory as fallback for space check
+        local vm_disk_free=$(df -BG "$HOME" 2>/dev/null | awk 'NR==2{print $4}' | sed 's/G//' || echo "100")
+        local disk_needed=$(echo "$DISK_SIZE" | sed 's/G//')
+    fi
     
     if [ "$vm_disk_free" -lt "$disk_needed" ]; then
         echo -e "${RED}⚠ WARNING: Not enough disk space!${RESET}"
         echo "  VM needs: ${disk_needed}G"
-        echo "  Available: ${vm_disk_free}G in $VM_DIR"
+        if [ -n "$VM_DIR" ]; then
+            echo "  Available: ${vm_disk_free}G in $VM_DIR"
+        else
+            echo "  Available: ${vm_disk_free}G in $HOME"
+        fi
         warnings=$((warnings + 1))
     fi
     
@@ -224,15 +234,44 @@ select_disk_location() {
     local max_space=0
     local max_space_index=0
     
-    # Parse df output
-    while IFS= read -r line; do
-        local device=$(echo "$line" | awk '{print $1}')
-        local size=$(echo "$line" | awk '{print $2}')
-        local avail=$(echo "$line" | awk '{print $4}')
-        local mount=$(echo "$line" | awk '{print $6}')
+    # Parse filesystem output - use findmnt for reliable parsing
+    while read -r device mount fstype size used avail use_pct; do
+        # Skip empty lines
+        [ -z "$device" ] && continue
         
-        # Convert to GB for comparison
-        local avail_gb=$(echo "$avail" | sed 's/G//' | sed 's/M/0./' | sed 's/K/0.00/' | cut -d. -f1)
+        # Only process real block devices
+        [[ ! "$device" =~ ^/dev/ ]] && continue
+        
+        # Skip if avail is 0 or dash (not available)
+        [[ "$avail" == "0" ]] || [[ "$avail" == "-" ]] && continue
+        
+        # Validate mount point is actually a directory
+        [ ! -d "$mount" ] && continue
+        
+        # Skip special filesystems
+        [[ "$mount" =~ ^/(boot|snap|sys|proc|dev|run|tmp) ]] && continue
+        
+        # Validate fields
+        [ -z "$device" ] || [ -z "$mount" ] || [ -z "$avail" ] && continue
+        
+        # Convert to GB for comparison (handle different units properly)
+        local avail_gb=0
+        if [[ "$avail" =~ ^[0-9.]+G$ ]]; then
+            avail_gb=$(echo "$avail" | sed 's/G//' | cut -d. -f1)
+        elif [[ "$avail" =~ ^[0-9.]+M$ ]]; then
+            avail_gb=0
+        elif [[ "$avail" =~ ^[0-9.]+T$ ]]; then
+            avail_gb=$(echo "$avail" | sed 's/T//' | awk '{print int($1*1024)}')
+        elif [[ "$avail" =~ ^[0-9.]+K$ ]]; then
+            avail_gb=0
+        else
+            # Try to parse as number (no unit)
+            if [[ "$avail" =~ ^[0-9]+$ ]]; then
+                avail_gb=$((avail / 1024 / 1024 / 1024))
+            else
+                continue  # Skip invalid entries
+            fi
+        fi
         
         disks+=("$device")
         mount_points+=("$mount")
@@ -246,7 +285,14 @@ select_disk_location() {
         fi
         
         index=$((index + 1))
-    done < <(df -h | grep -E '^/dev/' | grep -v '/boot' | grep -v '/snap')
+    done < <(findmnt -n -o SOURCE,TARGET,FSTYPE,SIZE,USED,AVAIL,USE% 2>/dev/null || df -h --output=source,target,fstype,size,used,avail,pcent 2>/dev/null | grep -E '^/dev/' | tail -n +2)
+    
+    # Check if any disks found
+    if [ "${#disks[@]}" -eq 0 ]; then
+        print_error "No suitable disks found!"
+        echo "Please ensure you have at least one mounted disk with write access."
+        exit 1
+    fi
     
     # Display options
     echo -e "${GREEN}Available disks:${RESET}"
@@ -302,6 +348,20 @@ select_disk_location() {
     local selected_device="${disks[$selected_index]}"
     local selected_avail="${available_space[$selected_index]}"
     
+    # Validate mount point is actually a directory
+    if [ ! -d "$selected_mount" ]; then
+        print_error "Selected mount point is not a directory: $selected_mount"
+        print_error "This is a bug in disk detection. Please report this."
+        exit 1
+    fi
+    
+    # Check write permission
+    if [ ! -w "$selected_mount" ]; then
+        print_error "No write permission on: $selected_mount"
+        print_error "Please select a different disk or run with appropriate permissions."
+        exit 1
+    fi
+    
     echo ""
     print_info "Selected disk: $selected_device"
     print_info "Mount point: $selected_mount"
@@ -314,11 +374,58 @@ select_disk_location() {
     SEED_FILE="$VM_DIR/seed.iso"
     MONITOR_LOG="$VM_DIR/monitor.log"
     
-    # Check if enough space
-    local avail_gb=$(echo "$selected_avail" | sed 's/G//' | sed 's/M/0./' | cut -d. -f1)
+    # Check if enough space (handle different units properly)
+    local avail_mb
+    local avail_gb
+    
+    # Convert available space to MB for accurate comparison
+    if [[ "$selected_avail" =~ G$ ]]; then
+        avail_gb=$(echo "$selected_avail" | sed 's/G//' | cut -d. -f1)
+        avail_mb=$(echo "$selected_avail" | sed 's/G//' | awk '{print int($1*1024)}')
+    elif [[ "$selected_avail" =~ M$ ]]; then
+        avail_gb=0
+        avail_mb=$(echo "$selected_avail" | sed 's/M//' | cut -d. -f1)
+    elif [[ "$selected_avail" =~ T$ ]]; then
+        avail_gb=$(echo "$selected_avail" | sed 's/T//' | awk '{print int($1*1024)}')
+        avail_mb=$(echo "$selected_avail" | sed 's/T//' | awk '{print int($1*1024*1024)}')
+    else
+        avail_gb=0
+        avail_mb=0
+    fi
+    
     local needed_gb=$(echo "$DISK_SIZE" | sed 's/G//')
     
-    if [ "$avail_gb" -lt "$needed_gb" ]; then
+    # Critical warning: Less than 500MB available
+    if [ "$avail_mb" -lt 500 ]; then
+        echo ""
+        echo -e "${RED}╔════════════════════════════════════════════════════╗${RESET}"
+        echo -e "${RED}║              ⚠️  CRITICAL WARNING ⚠️                ║${RESET}"
+        echo -e "${RED}╚════════════════════════════════════════════════════╝${RESET}"
+        echo ""
+        print_error "Host is running out of storage space!"
+        echo -e "${RED}  Available: ${selected_avail} (< 500MB)${RESET}"
+        echo -e "${RED}  VM needs: ${DISK_SIZE}${RESET}"
+        echo ""
+        echo -e "${YELLOW}Risks:${RESET}"
+        echo "  - VM installation may fail"
+        echo "  - System may become unstable"
+        echo "  - Data corruption possible"
+        echo "  - Host OS may crash"
+        echo ""
+        echo -e "${CYAN}Recommendations:${RESET}"
+        echo "  1. Free up space on the disk"
+        echo "  2. Choose a different disk with more space"
+        echo "  3. Cancel and clean up unnecessary files"
+        echo ""
+        read -p "Do you REALLY want to continue? (y/N): " -n 1 -r
+        echo ""
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            print_info "Setup cancelled - Good choice!"
+            exit 0
+        fi
+        print_warn "Continuing with critically low disk space..."
+    # Standard warning: Not enough space for VM
+    elif [ "$avail_gb" -lt "$needed_gb" ]; then
         echo ""
         print_warn "Warning: Selected disk may not have enough space!"
         print_warn "  Available: ${selected_avail}"
@@ -696,6 +803,338 @@ stop_vm() {
     pkill -f "qemu-system-x86_64.*$VM_NAME" || print_warn "VM not running"
 }
 
+find_vm_directory() {
+    local require_exists="${1:-true}"
+    
+    # Find VM directory
+    local found_vm_dir=""
+    if [ -d "$HOME/VMs/$VM_NAME" ]; then
+        found_vm_dir="$HOME/VMs/$VM_NAME"
+    else
+        # Search in all mounted disks - use null delimiter for safety
+        while IFS= read -r -d '' mount; do
+            if [ -d "$mount/VMs/$VM_NAME" ]; then
+                found_vm_dir="$mount/VMs/$VM_NAME"
+                break
+            fi
+        done < <(df --output=target | tail -n +2 | grep -v '^/boot' | grep -v '^/snap' | tr '\n' '\0')
+    fi
+    
+    if [ -z "$found_vm_dir" ] && [ "$require_exists" = "true" ]; then
+        print_error "VM not found!"
+        echo "Searched locations:"
+        echo "  - $HOME/VMs/$VM_NAME"
+        echo "  - All mounted disks under /VMs/$VM_NAME"
+        return 1
+    fi
+    
+    echo "$found_vm_dir"
+    return 0
+}
+
+setup_vm_paths() {
+    # Helper function to set VM paths after finding directory
+    if [ -n "$VM_DIR" ]; then
+        IMG_FILE="$VM_DIR/ubuntu-base.img"
+        SEED_FILE="$VM_DIR/seed.iso"
+        MONITOR_LOG="$VM_DIR/monitor.log"
+    fi
+}
+
+remove_vm() {
+    local create_backup=true
+    
+    echo ""
+    echo -e "${RED}╔════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${RED}║              ⚠️  DELETE VM WARNING ⚠️               ║${RESET}"
+    echo -e "${RED}╚════════════════════════════════════════════════════╝${RESET}"
+    echo ""
+    
+    VM_DIR=$(find_vm_directory)
+    
+    # Show VM info
+    echo -e "${YELLOW}VM to be deleted:${RESET}"
+    echo "  Location: $VM_DIR"
+    if [ -f "$VM_DIR/ubuntu-base.img" ]; then
+        local vm_size=$(du -sh "$VM_DIR" 2>/dev/null | awk '{print $1}')
+        echo "  Size:     $vm_size"
+    fi
+    echo ""
+    
+    # Check if VM is running
+    if pgrep -f "qemu-system-x86_64.*$VM_NAME" &>/dev/null; then
+        print_warn "VM is currently RUNNING!"
+        echo ""
+        read -p "Stop VM before deleting? (y/N): " -n 1 -r
+        echo ""
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            stop_vm
+            sleep 2
+        else
+            print_error "Cannot delete running VM. Please stop it first."
+            exit 1
+        fi
+    fi
+    
+    # Confirmation
+    echo -e "${RED}This will permanently delete:${RESET}"
+    echo "  - All VM files and data"
+    echo "  - Ubuntu system image"
+    echo "  - All installed packages"
+    echo "  - All user files and configurations"
+    echo "  - Monitor logs"
+    echo ""
+    if [ "$create_backup" = true ]; then
+        echo -e "${GREEN}A backup will be created before deletion${RESET}"
+    else
+        echo -e "${RED}NO BACKUP will be created!${RESET}"
+    fi
+    echo ""
+    
+    read -p "Are you sure you want to delete this VM? (y/N): " -n 1 -r
+    echo ""
+    
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo ""
+        
+        # Create backup if requested
+        local backup_dir=""
+        if [ "$create_backup" = true ]; then
+            print_info "Creating backup before deletion..."
+            backup_dir="$VM_DIR.backup.$(date +%s)"
+            
+            # Check if we have write permission in parent directory
+            local parent_dir=$(dirname "$VM_DIR")
+            if [ ! -w "$parent_dir" ]; then
+                print_error "No write permission in $parent_dir"
+                print_error "Cannot create backup. Aborting deletion."
+                exit 1
+            fi
+            
+            # Check if enough space for backup
+            local vm_size=$(du -sb "$VM_DIR" 2>/dev/null | awk '{print $1}')
+            local avail_space=$(df -B1 "$parent_dir" 2>/dev/null | awk 'NR==2{print $4}')
+            if [ "$vm_size" -gt "$avail_space" ]; then
+                print_error "Not enough space for backup!"
+                print_error "  VM size: $(numfmt --to=iec $vm_size)"
+                print_error "  Available: $(numfmt --to=iec $avail_space)"
+                read -p "Continue WITHOUT backup? (y/N): " -n 1 -r
+                echo ""
+                if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                    print_info "Deletion cancelled"
+                    exit 0
+                fi
+                backup_dir=""
+            else
+                # Attempt backup
+                if cp -r "$VM_DIR" "$backup_dir" 2>&1 | tee /tmp/backup_error.log; then
+                    # Verify backup
+                    if [ -d "$backup_dir" ] && [ "$(ls -A "$backup_dir")" ]; then
+                        print_info "Backup created: $backup_dir"
+                    else
+                        print_error "Backup verification failed!"
+                        cat /tmp/backup_error.log
+                        read -p "Continue WITHOUT backup? (y/N): " -n 1 -r
+                        echo ""
+                        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                            print_info "Deletion cancelled"
+                            rm -rf "$backup_dir" 2>/dev/null
+                            exit 0
+                        fi
+                        backup_dir=""
+                    fi
+                else
+                    print_error "Backup failed!"
+                    cat /tmp/backup_error.log
+                    read -p "Continue WITHOUT backup? (y/N): " -n 1 -r
+                    echo ""
+                    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                        print_info "Deletion cancelled"
+                        exit 0
+                    fi
+                    backup_dir=""
+                fi
+                rm -f /tmp/backup_error.log
+            fi
+            echo ""
+        fi
+        
+        print_info "Deleting VM..."
+        
+        # Delete VM directory
+        if rm -rf "$VM_DIR"; then
+            echo ""
+            echo -e "${GREEN}╔════════════════════════════════════════════════════╗${RESET}"
+            echo -e "${GREEN}║              VM DELETED SUCCESSFULLY               ║${RESET}"
+            echo -e "${GREEN}╚════════════════════════════════════════════════════╝${RESET}"
+            echo ""
+            print_info "VM deleted: $VM_DIR"
+            if [ -n "$backup_dir" ] && [ -d "$backup_dir" ]; then
+                print_info "Backup available: $backup_dir"
+                echo ""
+                echo -e "${CYAN}To restore from backup:${RESET}"
+                echo "  mv \"$backup_dir\" \"$VM_DIR\""
+            fi
+        else
+            print_error "Failed to delete VM directory"
+            exit 1
+        fi
+    else
+        print_info "Deletion cancelled"
+        exit 0
+    fi
+}
+
+remove_vm_no_backup() {
+    echo ""
+    echo -e "${RED}╔════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${RED}║        ⚠️  DELETE VM WITHOUT BACKUP ⚠️              ║${RESET}"
+    echo -e "${RED}╚════════════════════════════════════════════════════╝${RESET}"
+    echo ""
+    
+    VM_DIR=$(find_vm_directory)
+    
+    # Show VM info
+    echo -e "${YELLOW}VM to be deleted:${RESET}"
+    echo "  Location: $VM_DIR"
+    if [ -f "$VM_DIR/ubuntu-base.img" ]; then
+        local vm_size=$(du -sh "$VM_DIR" 2>/dev/null | awk '{print $1}')
+        echo "  Size:     $vm_size"
+    fi
+    echo ""
+    
+    # Check if VM is running
+    if pgrep -f "qemu-system-x86_64.*$VM_NAME" &>/dev/null; then
+        print_warn "VM is currently RUNNING!"
+        echo ""
+        read -p "Stop VM before deleting? (y/N): " -n 1 -r
+        echo ""
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            stop_vm
+            sleep 2
+        else
+            print_error "Cannot delete running VM. Please stop it first."
+            exit 1
+        fi
+    fi
+    
+    # Confirmation
+    echo -e "${RED}This will permanently delete:${RESET}"
+    echo "  - All VM files and data"
+    echo "  - Ubuntu system image"
+    echo "  - All installed packages"
+    echo "  - All user files and configurations"
+    echo "  - Monitor logs"
+    echo ""
+    echo -e "${RED}⚠️  NO BACKUP WILL BE CREATED!${RESET}"
+    echo -e "${YELLOW}This action CANNOT be undone!${RESET}"
+    echo ""
+    
+    read -p "Are you ABSOLUTELY sure? (y/N): " -n 1 -r
+    echo ""
+    
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo ""
+        print_info "Deleting VM without backup..."
+        
+        # Delete VM directory
+        if rm -rf "$VM_DIR"; then
+            echo ""
+            echo -e "${GREEN}╔════════════════════════════════════════════════════╗${RESET}"
+            echo -e "${GREEN}║              VM DELETED SUCCESSFULLY               ║${RESET}"
+            echo -e "${GREEN}╚════════════════════════════════════════════════════╝${RESET}"
+            echo ""
+            print_info "VM deleted: $VM_DIR"
+        else
+            print_error "Failed to delete VM directory"
+            exit 1
+        fi
+    else
+        print_info "Deletion cancelled"
+        exit 0
+    fi
+}
+
+reinstall_vm() {
+    echo ""
+    echo -e "${YELLOW}╔════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${YELLOW}║              REINSTALL VM (FRESH)                  ║${RESET}"
+    echo -e "${YELLOW}╚════════════════════════════════════════════════════╝${RESET}"
+    echo ""
+    
+    # Check if VM exists
+    local found_vm_dir=""
+    if [ -d "$HOME/VMs/$VM_NAME" ]; then
+        found_vm_dir="$HOME/VMs/$VM_NAME"
+    else
+        for mount in $(df -h | grep -E '^/dev/' | awk '{print $6}'); do
+            if [ -d "$mount/VMs/$VM_NAME" ]; then
+                found_vm_dir="$mount/VMs/$VM_NAME"
+                break
+            fi
+        done
+    fi
+    
+    if [ -n "$found_vm_dir" ]; then
+        VM_DIR="$found_vm_dir"
+        
+        echo -e "${YELLOW}Existing VM found:${RESET}"
+        echo "  Location: $VM_DIR"
+        if [ -f "$VM_DIR/ubuntu-base.img" ]; then
+            local vm_size=$(du -sh "$VM_DIR" 2>/dev/null | awk '{print $1}')
+            echo "  Size:     $vm_size"
+        fi
+        echo ""
+        
+        # Check if VM is running
+        if pgrep -f "qemu-system-x86_64.*$VM_NAME" &>/dev/null; then
+            print_warn "VM is currently RUNNING!"
+            echo ""
+            read -p "Stop VM before reinstalling? (y/N): " -n 1 -r
+            echo ""
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                stop_vm
+                sleep 2
+            else
+                print_error "Cannot reinstall while VM is running."
+                exit 1
+            fi
+        fi
+        
+        echo -e "${RED}This will DELETE all existing VM data and install fresh:${RESET}"
+        echo "  - All user files will be lost"
+        echo "  - All installed packages will be lost"
+        echo "  - All configurations will be lost"
+        echo ""
+        echo -e "${GREEN}A new clean VM will be installed${RESET}"
+        echo ""
+        
+        read -p "Continue with reinstall? (y/N): " -n 1 -r
+        echo ""
+        
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            print_info "Reinstall cancelled"
+            exit 0
+        fi
+        
+        echo ""
+        print_info "Deleting old VM..."
+        rm -rf "$VM_DIR"
+    else
+        print_info "No existing VM found. Installing fresh..."
+    fi
+    
+    echo ""
+    print_info "Installing fresh VM..."
+    echo ""
+    
+    # Continue with normal setup
+    show_host_specs
+    select_disk_location
+    setup_vm
+    start_vm
+}
+
 check_vm_responsive() {
     # Check if QEMU process exists
     if ! pgrep -f "qemu-system-x86_64.*$VM_NAME" >/dev/null; then
@@ -706,6 +1145,30 @@ check_vm_responsive() {
     local qemu_pid=$(pgrep -f "qemu-system-x86_64.*$VM_NAME" | head -1)
     if [ -z "$qemu_pid" ]; then
         return 1
+    fi
+    
+    # Check host disk space - critical check (more aggressive threshold)
+    if [ -n "$VM_DIR" ] && [ -d "$VM_DIR" ]; then
+        # Use bytes for more accurate check
+        local disk_avail=$(df -B1 "$VM_DIR" 2>/dev/null | awk 'NR==2{print $4}' || echo "1000000000")
+        local critical_threshold=$((100 * 1024 * 1024))  # 100MB threshold
+        
+        if [ "$disk_avail" -le "$critical_threshold" ]; then
+            local avail_mb=$((disk_avail / 1024 / 1024))
+            echo "[$(date)] CRITICAL: Host disk critically low (${avail_mb}MB)! Auto-killing QEMU..." >> "$MONITOR_LOG" 2>/dev/null || true
+            print_error "Host disk is CRITICALLY LOW (${avail_mb}MB)! Auto-killing QEMU to prevent system crash..."
+            
+            # Try graceful shutdown first
+            pkill -TERM -f "qemu-system-x86_64.*$VM_NAME" 2>/dev/null
+            sleep 2
+            
+            # Force kill if still running
+            if pgrep -f "qemu-system-x86_64.*$VM_NAME" >/dev/null; then
+                pkill -9 -f "qemu-system-x86_64.*$VM_NAME" 2>/dev/null
+            fi
+            
+            return 2  # Special return code for disk full
+        fi
     fi
     
     # Check process state (D = uninterruptible sleep = frozen)
@@ -824,12 +1287,41 @@ monitor_vm_health() {
     local recovery_attempt=0
     
     print_info "Starting VM health monitor..."
+    # Ensure MONITOR_LOG is set
+    if [ -z "$MONITOR_LOG" ]; then
+        MONITOR_LOG="$VM_DIR/monitor.log"
+    fi
     echo "Monitor started at $(date)" > "$MONITOR_LOG"
     
     while true; do
         sleep "$FREEZE_CHECK_INTERVAL"
         
-        if ! check_vm_responsive; then
+        check_vm_responsive
+        local responsive_status=$?
+        
+        # Check if disk is full (return code 2)
+        if [ $responsive_status -eq 2 ]; then
+            echo "[$(date)] QEMU killed due to disk full" >> "$MONITOR_LOG"
+            print_error "VM terminated due to host disk full!"
+            echo ""
+            echo -e "${RED}╔════════════════════════════════════════════════════╗${RESET}"
+            echo -e "${RED}║         VM TERMINATED - DISK FULL                  ║${RESET}"
+            echo -e "${RED}╚════════════════════════════════════════════════════╝${RESET}"
+            echo ""
+            echo -e "${YELLOW}What happened:${RESET}"
+            echo "  - Host disk ran out of space (0MB available)"
+            echo "  - QEMU was automatically killed to prevent system crash"
+            echo "  - VM data may be corrupted"
+            echo ""
+            echo -e "${CYAN}Next steps:${RESET}"
+            echo "  1. Free up disk space immediately"
+            echo "  2. Check VM integrity: $VM_DIR"
+            echo "  3. Consider moving VM to a larger disk"
+            echo ""
+            exit 1
+        fi
+        
+        if [ $responsive_status -ne 0 ]; then
             freeze_count=$((freeze_count + 1))
             echo "[$(date)] Freeze check failed ($freeze_count/$FREEZE_THRESHOLD)" >> "$MONITOR_LOG"
             
@@ -872,8 +1364,69 @@ start_vm_with_monitor() {
     # Start VM in background
     print_info "Starting VM with freeze monitoring..."
     
-    # Start VM
-    start_vm &
+    # Create a temporary script to run the VM
+    local vm_script="$VM_DIR/start_vm_temp.sh"
+    cat > "$vm_script" << 'EOF'
+#!/bin/bash
+# Temporary VM start script
+cd "$VM_DIR"
+
+# TCG-specific optimizations
+local EXTRA_FLAGS=""
+if [ "$USE_KVM" = false ]; then
+    print_info "Using TCG optimizations for better performance..."
+    # Simpler network for TCG (no multi-queue)
+    EXTRA_FLAGS="-device virtio-net-pci,netdev=n0"
+else
+    # Full features for KVM
+    EXTRA_FLAGS="-device virtio-net-pci,netdev=n0,mq=on,vectors=4"
+fi
+
+# CRITICAL FIX: cache=unsafe causes data corruption and freezes
+# Use cache=writeback with proper AIO for stability
+local CACHE_MODE="writeback"
+local AIO_MODE="native"  # native is faster and more stable than threads
+
+# For TCG, use threads AIO (native requires KVM)
+if [ "$USE_KVM" = false ]; then
+    AIO_MODE="threads"
+fi
+
+# Create log file for debugging
+local LOG_FILE="$VM_DIR/qemu.log"
+
+exec qemu-system-x86_64 \
+    $KVM_FLAG \
+    -machine q35,accel=$([ "$USE_KVM" = true ] && echo "kvm" || echo "tcg"),kernel_irqchip=on \
+    -m "$RAM" \
+    -smp "$CPU_CORES",cores="$CPU_CORES",threads=1,sockets=1,maxcpus="$CPU_CORES" \
+    -object iothread,id=io1 \
+    -drive file="$IMG_FILE",format=qcow2,if=none,id=drive0,cache="$CACHE_MODE",aio="$AIO_MODE",discard=unmap \
+    -device virtio-blk-pci,drive=drive0,iothread=io1,num-queues="$CPU_CORES" \
+    -drive file="$SEED_FILE",format=raw,if=virtio,cache=none,readonly=on \
+    -boot order=c,menu=off,strict=on \
+    $EXTRA_FLAGS \
+    -netdev user,id=n0,hostfwd=tcp::"$SSH_PORT"-:22,net=10.0.2.0/24,dhcpstart=10.0.2.15 \
+    -device virtio-balloon-pci,id=balloon0,deflate-on-oom=on,free-page-reporting=on \
+    -device virtio-rng-pci,rng=rng0 \
+    -object rng-random,id=rng0,filename=/dev/urandom \
+    -nographic \
+    -serial mon:stdio \
+    -no-reboot \
+    -rtc base=localtime,clock=host,driftfix=slew \
+    -global kvm-pit.lost_tick_policy=discard \
+    -overcommit mem-lock=off \
+    -overcommit cpu-pm=on \
+    -msg timestamp=on \
+    -D "$LOG_FILE" \
+    -pidfile "$VM_DIR/qemu.pid" \
+    -name "$VM_NAME",process="$VM_NAME",debug-threads=on
+EOF
+    
+    chmod +x "$vm_script"
+    
+    # Start VM script in background
+    bash "$vm_script" &
     local vm_pid=$!
     
     # Wait for VM to start
@@ -894,7 +1447,7 @@ start_vm_with_monitor() {
     if kill -0 $monitor_pid 2>/dev/null; then
         kill $monitor_pid 2>/dev/null
     fi
-    rm -f "$VM_DIR/monitor.pid"
+    rm -f "$VM_DIR/monitor.pid" "$vm_script"
 }
 
 show_help() {
@@ -909,6 +1462,9 @@ Options:
   -s, --start   Start VM with GUI
   -m, --monitor Start VM with freeze monitoring
   -k, --stop    Stop VM
+  -r, --remove  Remove/Delete VM (with backup, y/N confirm)
+  -rm           Remove VM WITHOUT backup (y/N confirm)
+  -n, --new     Reinstall VM (delete old + install fresh)
   -i, --info    Show VM information
   --help        Show this help
 
@@ -917,6 +1473,9 @@ Examples:
   $0 -s           # Start VM with GUI
   $0 -m           # Start VM with freeze monitoring
   $0 -k           # Stop VM
+  $0 -r           # Remove VM with backup
+  $0 -rm          # Remove VM without backup (faster)
+  $0 -n           # Reinstall fresh VM
   $0 -i           # Show info
 
 Credentials:
@@ -931,6 +1490,8 @@ Terminal Controls:
 Features:
   ✓ Choose disk location for VM installation
   ✓ Host system specs check before start
+  ✓ Low storage warning (< 500MB)
+  ✓ Auto-kill QEMU when host disk full (0MB)
   ✓ Auto-login to terminal after boot
   ✓ Cloud-init auto-configuration
   ✓ SSH ready on port $SSH_PORT
@@ -945,7 +1506,7 @@ Disk Selection:
 
 Files:
   VM Dir:   Selected during setup
-  Image:    40GB (grows as needed)
+  Image:    20GB (grows as needed)
 EOF
 }
 
@@ -969,34 +1530,35 @@ case "${1:-}" in
         start_vm_with_monitor
         ;;
     -k|--stop)
-        # For stop, we need to find existing VM
-        # Check common locations
-        if [ -d "$HOME/VMs/$VM_NAME" ]; then
-            VM_DIR="$HOME/VMs/$VM_NAME"
+        # Find existing VM
+        VM_DIR=$(find_vm_directory false)
+        if [ -n "$VM_DIR" ]; then
+            setup_vm_paths
+            stop_vm
         else
-            # Search in all mounted disks
-            for mount in $(df -h | grep -E '^/dev/' | awk '{print $6}'); do
-                if [ -d "$mount/VMs/$VM_NAME" ]; then
-                    VM_DIR="$mount/VMs/$VM_NAME"
-                    break
-                fi
-            done
+            print_warn "VM not found, nothing to stop"
         fi
-        stop_vm
+        ;;
+    -r|--remove)
+        remove_vm
+        ;;
+    -rm)
+        remove_vm_no_backup
+        ;;
+    -n|--new)
+        reinstall_vm
         ;;
     -i|--info)
-        # For info, find existing VM
-        if [ -d "$HOME/VMs/$VM_NAME" ]; then
-            VM_DIR="$HOME/VMs/$VM_NAME"
+        # Find existing VM
+        VM_DIR=$(find_vm_directory false)
+        if [ -n "$VM_DIR" ]; then
+            setup_vm_paths
+            vm_info
         else
-            for mount in $(df -h | grep -E '^/dev/' | awk '{print $6}'); do
-                if [ -d "$mount/VMs/$VM_NAME" ]; then
-                    VM_DIR="$mount/VMs/$VM_NAME"
-                    break
-                fi
-            done
+            print_error "VM not found!"
+            echo "Run '$0' to create a new VM"
+            exit 1
         fi
-        vm_info
         ;;
     --help)
         show_help
